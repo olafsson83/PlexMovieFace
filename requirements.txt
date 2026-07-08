@@ -1,0 +1,11 @@
+requests
+python-dotenv
+opencv-python
+insightface
+numpy<2
+tqdm
+scikit-learn
+imageio-ffmpeg
+
+# insightface pulls in plain (CPU) onnxruntime on its own. If you have an
+# NVIDIA GPU, setup.py swaps it for onnxruntime-gpu[cuda,cudnn] automatically.

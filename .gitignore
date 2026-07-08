@@ -1,0 +1,23 @@
+# secrets
+.env
+
+# large/generated/personal media (regenerable or private, don't belong in git)
+discovery_frames/
+characters/
+source_faces/
+output/
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# face-swap models (large binaries, licensing restricts redistribution)
+*.onnx
+.insightface/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
