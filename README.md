@@ -31,8 +31,10 @@ its proven GPU/CUDA setup and config patterns.
      the same photo. No merge tool needed.
 3. **Swap** — processes the whole movie, matching each detected face to the
    nearest discovered character and swapping in your photo where you've
-   provided one, then re-muxes the original audio back in. Output is a new
-   file — your original movie is never touched.
+   provided one, then re-muxes the original audio back in. Full detection
+   only runs every few frames (tracking fills in the gap — see Performance
+   below); output is written and encoded in resumable chunks. Your original
+   movie file is never touched.
 
 ## Quick start
 
@@ -56,33 +58,61 @@ python run.py
   few seconds, without scanning literally every frame),
 - ask if you have an NVIDIA GPU and install the matching `onnxruntime` variant
   (with working CUDA/cuDNN, not just the package — see the sibling repo's
-  README if you want the details on why that distinction matters),
+  README if you want the details on why that distinction matters, and the
+  known GPU limitation noted below),
 - check ffmpeg is available (falls back to a bundled copy automatically if
   it's not already on your system),
 - download the face-swap model (~530MB, one-time),
 - write all of that to `.env`.
 
 `run.py` (or `run.bat`) then gives you a menu to run discovery, run the swap,
-or both.
+run both, or **calibrate** (see below).
 
 ## Performance — read this before running on a full movie
 
 Full-movie processing is **much** heavier than a poster or a single image:
-a 90-minute movie is 130,000+ frames. This first version processes every
-frame with no shortcuts (no frame-skipping/tracking yet — that's planned as a
-follow-up once this simpler version is proven correct), so:
+a 90-minute movie is 130,000+ frames.
 
-- **Always test on a short clip first.** Cut one with ffmpeg:
-  `ffmpeg -i movie.mp4 -t 180 -c copy test_clip.mp4` (~3 minutes), point
-  `MOVIE_PATH` at that, and run the full discover → name → swap workflow on
-  it. Note how long the swap stage actually takes for those 3 minutes and
-  multiply up to estimate a full movie — the real number depends heavily on
-  your CPU/GPU and how many named characters are on screen at once.
-- **There's no crash-resumability yet.** If a multi-hour run on a full movie
-  gets interrupted (crash, sleep, Ctrl+C), it starts over from scratch. Fine
-  for a short clip; a real risk for a full movie until a future version adds
-  resumable chunked processing. Disable sleep/display-timeout-triggered sleep
-  on your machine before a long unattended run.
+- **Always calibrate before a full run.** `run.py` menu option 4 (or
+  `python run.py --calibrate` / `python run.py --calibrate 60` for a custom
+  sample length) processes a short sample of the movie, measures your actual
+  machine's real speed, and projects a full-movie time estimate — so you know
+  what you're committing to *before* walking away for hours, not after.
+- **Detection doesn't run on every frame.** Full face detection runs every
+  `DETECT_EVERY_N_FRAMES` frames (default 5) or immediately after a detected
+  scene cut; frames in between track the same faces' position via optical
+  flow instead of re-detecting, reusing the classification from the last full
+  detection. This is the dominant speedup lever. If you ever suspect tracking
+  drift (a swap looking slightly misaligned partway between detections), run
+  with `--no-tracking` to force full per-frame detection and compare — slower,
+  but a useful correctness check.
+- **Output is resumable.** The swap stage writes output in chunks
+  (`SEGMENT_FRAME_COUNT` frames per chunk, default 5000) under
+  `output/_segments/`. If a run is interrupted (crash, Ctrl+C, sleep), just
+  re-run the swap stage — it picks up from the last complete chunk instead of
+  starting over. Still worth disabling sleep/display-timeout-triggered sleep
+  before a long unattended run.
+- **Hardware encode is used automatically when available** (NVENC), freeing
+  the CPU for tracking/detection work; falls back to `libx264` otherwise —
+  always correct, just slower to encode.
+
+### Known limitation: GPU acceleration may silently fall back to CPU
+
+On at least one tested machine (NVIDIA RTX 4060 Laptop, recent driver),
+`onnxruntime-gpu`'s cuDNN-9 JIT graph-compilation engine
+(`cudnn_engines_tensor_ir64_9.dll`) fails to initialize with
+`CUDNN_BACKEND_API_FAILED`, and onnxruntime automatically falls back to CPU
+per-operation. **This does not affect correctness** — the fallback is
+automatic and safe — only speed. If you hit this: it was not resolved by
+updating the NVIDIA driver, the Visual C++ Redistributable, doing a clean
+`nvidia-cudnn-cu12` reinstall, forcing `HEURISTIC` conv algorithm search, or
+installing the CUDA Toolkit directly (which as of this writing ships CUDA 13,
+a version mismatch with the pip-packaged CUDA 12 libraries `onnxruntime-gpu`
+actually uses — Windows DLL loading requires exact filename version matches,
+so a v13 Toolkit install doesn't help a v12-targeted build). If your swap
+stage logs `Applied providers: ['CPUExecutionProvider']` instead of
+`CUDAExecutionProvider`, you're hitting this; `--calibrate` will still give
+you an honest number for your actual (CPU-fallback) speed.
 
 ## Notes & troubleshooting
 
@@ -93,12 +123,12 @@ follow-up once this simpler version is proven correct), so:
   face to work with. Not an error, just a natural limit.
 - **A face gets matched to a character but nothing happens**: you didn't
   provide a `characterN.jpg` for that number — that's intentional (unnamed
-  faces are left alone), not a bug. The swap stage's summary at the end tells
-  you how many faces were "recognized but no source photo provided" so you
-  can tell whether that's what's happening.
+  faces are left alone), not a bug.
 - **Re-running `setup.py`** is always safe — overwrites `.env`, skips
   re-downloading the model if it's already there.
 - **Discovery finds too few / too many characters**: adjust `CLUSTER_EPS`
   (higher = more lenient, groups more loosely) or `CLUSTER_MIN_SAMPLES`
   (lower = counts a character from fewer appearances) in `.env`, then re-run
   discovery.
+- **Want to redo a run from scratch instead of resuming**: delete
+  `output/_segments/` before re-running the swap stage.
