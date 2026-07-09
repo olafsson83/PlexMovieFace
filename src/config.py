@@ -30,6 +30,22 @@ CLUSTER_MIN_SAMPLES = int(os.environ.get("CLUSTER_MIN_SAMPLES", "3"))
 
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
+# Phase 2: run full face detection every Nth frame; track kps (facial
+# landmarks) via optical flow on the frames in between instead of
+# re-detecting, to avoid the dominant per-frame detection cost.
+DETECT_EVERY_N_FRAMES = int(os.environ.get("DETECT_EVERY_N_FRAMES", "5"))
+# Mean grayscale pixel difference between consecutive frames above this
+# forces a full re-detection regardless of DETECT_EVERY_N_FRAMES, since a
+# scene cut invalidates whatever was being tracked.
+SCENE_CUT_THRESHOLD = float(os.environ.get("SCENE_CUT_THRESHOLD", "30.0"))
+# Encode in chunks of this many frames so a multi-hour run can resume from
+# the last complete chunk instead of restarting from scratch after a crash.
+SEGMENT_FRAME_COUNT = int(os.environ.get("SEGMENT_FRAME_COUNT", "5000"))
+# Off by default: hardware (NVENC) encode failed intermittently in testing
+# on at least one machine. libx264 is slower but proven reliable; only
+# enable this after confirming NVENC is stable on your own machine.
+USE_NVENC = os.environ.get("USE_NVENC", "false").lower() == "true"
+
 PLEX_URL = os.environ.get("PLEX_URL", "http://127.0.0.1:32400").rstrip("/")
 PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 
