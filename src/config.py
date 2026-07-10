@@ -72,6 +72,16 @@ TRACK_MISS_LIMIT = int(os.environ.get("TRACK_MISS_LIMIT", "2"))
 # present; set false to force the .env MATCH/MAINTAIN values.
 IDENTITY_AUTO_CALIBRATION = os.environ.get("IDENTITY_AUTO_CALIBRATION", "true").lower() == "true"
 
+# Plate matching (see plate_matching.py): degrade the generated face layer
+# to match the plate's optics before compositing. Phase 3: sharpness.
+SHARPNESS_MATCHING = os.environ.get("SHARPNESS_MATCHING", "true").lower() == "true"
+# Fractional tolerance when matching Laplacian variance -- demanding exact
+# equality makes sigma oscillate between frames.
+SHARPNESS_TOLERANCE = float(os.environ.get("SHARPNESS_TOLERANCE", "0.12"))
+SHARPNESS_MAX_SIGMA = float(os.environ.get("SHARPNESS_MAX_SIGMA", "3.0"))
+# EMA weight on the previous smoothed sigma (0 = no smoothing).
+SHARPNESS_TEMPORAL_SMOOTHING = float(os.environ.get("SHARPNESS_TEMPORAL_SMOOTHING", "0.7"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial

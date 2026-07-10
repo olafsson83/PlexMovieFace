@@ -27,15 +27,26 @@ were identity failures (the elderly-extra bug), not optics.
      bar, confirmation frames only for borderline scores (the elderly-extra
      regime: 0.638, one frame, would never have confirmed).
 
-2. **Sharpness/defocus matching**
+2. **Sharpness/defocus matching** (done -- see finding below)
    - Operate on the generated face layer *before* compositing
      (`swapper.get(..., paste_back=False)` returns the aligned fake crop +
-     transform; we own the paste-back), constrained by the warped swap alpha.
+     transform; we own the paste-back, byte-identical parity verified).
      Blurring the finished composite would halo original plate pixels.
-   - Measure the *unswapped* plate crop (interior mask, eroded alpha; luma;
-     denoise first; Laplacian variance + gradient energy, not one metric).
-   - Bounded sigma search with tolerance (~12%) + temporal smoothing of
-     sigma per track; premultiplied blur so RGB and alpha soften together.
+   - Measure the *unswapped* plate crop (interior mask; luma; denoise first;
+     Laplacian variance + gradient energy, not one metric). Both crops share
+     the aligned 128px space, so sigma is measured and applied consistently.
+   - Bounded sigma search with tolerance (~12%) + temporal smoothing per
+     character with position-jump reset. Blur only when the fake is sharper
+     on BOTH metrics (identity-texture differences must not trigger blur).
+   - **Measured finding**: inswapper_128's output sharpness tracks its input
+     almost exactly (fake/plate Laplacian ratio 0.98 on a sharp plate, 1.04
+     on an artificially defocused one) -- the model synthesizes conditioned
+     on the aligned plate crop and inherits its blur. So for THIS model the
+     matcher is a safety net that rarely engages (18/967 swaps on the VCD
+     Harry Potter clip, sigma <= 0.41), not a big visual win. The
+     "plastic/pasted" impression is expected to come mostly from missing
+     grain -- which the sharpness metric deliberately ignores (it denoises
+     before measuring). Phase 3 (grain) is where the visible gain should be.
 
 3. **Grain / compression-texture matching**
    - Luma/chroma space, robust MAD estimator, annular sampling around the

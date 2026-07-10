@@ -35,6 +35,7 @@ from config import (
 )
 import face_engine
 import identity
+import plate_matching
 import preflight
 import tracking
 import video_io
@@ -110,9 +111,9 @@ def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts):
     return [tracking.TrackedFace(kps, number) for kps, number in swappable]
 
 
-def swap_and_write(frame, active_faces, sources, swapper, encoder, counts):
+def swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts):
     for face in active_faces:
-        frame = swapper.get(frame, face, sources[face.character_number], paste_back=True)
+        frame = plate_matcher.swap(frame, face, sources[face.character_number])
         counts["swapped"] += 1
     try:
         encoder.stdin.write(frame.tobytes())
@@ -133,7 +134,7 @@ def find_resume_point():
     return completed, completed * SEGMENT_FRAME_COUNT
 
 
-def run_calibration(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking, seconds):
+def run_calibration(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking, seconds):
     frame_limit = max(1, int(seconds * fps))
     tracker = tracking.FaceTracker()
     counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
@@ -149,7 +150,7 @@ def run_calibration(cap, fps, width, height, face_app, swapper, identity_mgr, so
         if not ret:
             break
         active_faces = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
-        swap_and_write(frame, active_faces, sources, swapper, encoder, counts)
+        swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts)
         processed += 1
     elapsed = time.time() - start
 
@@ -177,7 +178,7 @@ def run_calibration(cap, fps, width, height, face_app, swapper, identity_mgr, so
         print("Could not determine total frame count to project a full-movie estimate.")
 
 
-def run_full(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking):
+def run_full(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking):
     completed_segments, frames_done = find_resume_point()
     if completed_segments:
         print(f"Resuming: {completed_segments} segment(s) already complete ({frames_done} frames). "
@@ -209,7 +210,7 @@ def run_full(cap, fps, width, height, face_app, swapper, identity_mgr, sources, 
                         video_ended = True
                         break
                     active_faces = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
-                    swap_and_write(frame, active_faces, sources, swapper, encoder, counts)
+                    swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts)
                     frames_in_segment += 1
                     progress.update(1)
             finally:
@@ -280,6 +281,7 @@ def main():
     identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
 
     swapper = face_engine.build_swapper()
+    plate_matcher = plate_matching.PlateMatcher(swapper)
 
     cap = cv2.VideoCapture(str(MOVIE_PATH))
     if not cap.isOpened():
@@ -292,16 +294,17 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.calibrate is not None:
-        run_calibration(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking, args.calibrate)
+        run_calibration(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking, args.calibrate)
         cap.release()
         return
 
     SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    counts = run_full(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking)
+    counts = run_full(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking)
     final_path = finalize_output()
 
+    print(f"\n{plate_matcher.summary()}")
     print(
-        f"\nDone. {counts['swapped']} faces swapped. {counts['no_photo_events']} recognized-but-unswapped "
+        f"Done. {counts['swapped']} faces swapped. {counts['no_photo_events']} recognized-but-unswapped "
         f"and {counts['unmatched_events']} unrecognized events at full-detection frames (not exhaustive -- "
         f"tracked frames reuse the last detection's classification). Output: {final_path}"
     )
