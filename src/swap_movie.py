@@ -31,14 +31,13 @@ from tqdm import tqdm
 
 from config import (
     MOVIE_PATH, CHARACTERS_DIR, CLUSTERS_JSON, SOURCE_FACES_DIR, OUTPUT_DIR,
-    CLUSTER_EPS, SEGMENT_FRAME_COUNT, USE_NVENC,
+    MATCH_THRESHOLD, SEGMENT_FRAME_COUNT, USE_NVENC,
 )
 import face_engine
 import preflight
 import tracking
 import video_io
 
-MATCH_THRESHOLD = 1.0 - CLUSTER_EPS  # cosine similarity floor to count as a known character
 SEGMENTS_DIR = OUTPUT_DIR / "_segments"
 
 
@@ -94,8 +93,9 @@ def process_frame(frame, face_app, centroids, sources, tracker, use_tracking, co
     if not do_full_detection:
         return tracker.track(gray)
 
+    detected = face_app.get(frame)
     swappable = []
-    for face in face_app.get(frame):
+    for face in detected:
         number = classify(face, centroids)
         if number is None:
             counts["unmatched_events"] += 1
@@ -106,7 +106,8 @@ def process_frame(frame, face_app, centroids, sources, tracker, use_tracking, co
         swappable.append((face.kps, number))
 
     if use_tracking:
-        return tracker.start_from_detection(gray, swappable)
+        all_kps = [face.kps for face in detected]
+        return tracker.start_from_detection(gray, swappable, all_kps)
     return [tracking.TrackedFace(kps, number) for kps, number in swappable]
 
 

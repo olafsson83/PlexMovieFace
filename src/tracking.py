@@ -59,16 +59,68 @@ class FaceTracker:
             return True
         return self.is_scene_cut(gray)
 
-    def start_from_detection(self, gray, swappable_faces):
+    def start_from_detection(self, gray, swappable_faces, all_detected_kps=()):
         """Call on a full-detection frame. swappable_faces: list of
         (kps, character_number) pairs for faces that will actually be
-        swapped this frame. Returns the resulting TrackedFace list (same
-        shape as track()'s return), so callers can treat both uniformly.
+        swapped this frame. all_detected_kps: kps for *every* face this
+        detection pass found, regardless of classification outcome -- used
+        to tell apart "this tracked face's region wasn't examined this
+        frame" from "this tracked face's region was examined and is no
+        longer a match" (see below). Returns the resulting TrackedFace list
+        (same shape as track()'s return), so callers can treat both
+        uniformly.
+
+        A full-detection pass missing a character it just tracked fine one
+        frame earlier (a bad-angle instant right at this specific checkpoint
+        frame) used to wipe that character's track entirely, dropping the
+        swap until the *next* successful full detection -- often several
+        frames later. Such misses now carry forward via one more
+        optical-flow step (the same mechanism track() uses for skipped
+        frames) instead of being dropped outright.
+
+        That carry-forward must NOT apply when detection actually examined
+        this exact face and reclassified it -- e.g. a borderline embedding
+        match gets corrected to its real (unswapped) cluster a few frames
+        after an initial false positive. Carrying the old identity forward
+        in that case would resurrect a classification detection itself just
+        corrected, permanently pasting the wrong character onto that face
+        for as long as it stays on screen. So a track is only carried
+        forward if no detected face this pass was even near its last known
+        position; if one was, that fresh (possibly negative) result wins.
         """
-        self._tracked = [TrackedFace(kps.copy(), number) for kps, number in swappable_faces]
+        fresh = [TrackedFace(kps.copy(), number) for kps, number in swappable_faces]
+        fresh_numbers = {face.character_number for face in fresh}
+
+        still_missing = [
+            face for face in self._tracked
+            if face.character_number not in fresh_numbers
+            and not self._claimed_by_detection(face.kps, all_detected_kps)
+        ]
+        carried = self._track_step(self._prev_gray, gray, still_missing)
+
+        self._tracked = fresh + carried
         self._prev_gray = gray
         self._frames_since_detection = 0
         return self._tracked
+
+    @staticmethod
+    def _claimed_by_detection(kps, all_detected_kps):
+        """True if some detected face this pass sits roughly where `kps`
+        (a previously tracked face) last was -- i.e. detection did examine
+        this face, whatever it concluded, so a stale track shouldn't
+        override that. The "same face" radius scales with the tracked
+        face's own kps spread so it works across video resolutions.
+        """
+        if not len(all_detected_kps):
+            return False
+        spread = kps.max(axis=0) - kps.min(axis=0)
+        radius = 1.5 * float(np.hypot(*spread)) if spread.any() else 40.0
+        center = kps.mean(axis=0)
+        for other_kps in all_detected_kps:
+            other_center = np.asarray(other_kps).mean(axis=0)
+            if np.linalg.norm(center - other_center) < radius:
+                return True
+        return False
 
     def track(self, gray):
         """Call on a non-detection frame. Returns the TrackedFace list
@@ -76,16 +128,23 @@ class FaceTracker:
         picked up again at the next full detection.
         """
         self._frames_since_detection += 1
+        self._tracked = self._track_step(self._prev_gray, gray, self._tracked)
+        self._prev_gray = gray
+        return self._tracked
 
-        if not self._tracked or self._prev_gray is None:
-            self._prev_gray = gray
+    def _track_step(self, prev_gray, gray, faces):
+        """One optical-flow step for the given TrackedFace list. Returns the
+        survivors with updated kps -- lost ones (points untrackable or that
+        left the frame) are dropped.
+        """
+        if not faces or prev_gray is None:
             return []
 
         h, w = gray.shape[:2]
-        still_tracked = []
-        for face in self._tracked:
+        survivors = []
+        for face in faces:
             pts = face.kps.astype(np.float32).reshape(-1, 1, 2)
-            new_pts, status, _ = cv2.calcOpticalFlowPyrLK(self._prev_gray, gray, pts, None, **LK_PARAMS)
+            new_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None, **LK_PARAMS)
             if new_pts is None or status is None or not status.all():
                 continue  # lost one or more points -- drop until next full detection
             new_kps = new_pts.reshape(-1, 2)
@@ -93,8 +152,5 @@ class FaceTracker:
                     or (new_kps[:, 1] < 0).any() or (new_kps[:, 1] >= h).any():
                 continue  # a tracked point left the frame
             face.kps = new_kps
-            still_tracked.append(face)
-
-        self._tracked = still_tracked
-        self._prev_gray = gray
-        return still_tracked
+            survivors.append(face)
+        return survivors

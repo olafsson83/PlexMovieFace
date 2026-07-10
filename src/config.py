@@ -27,6 +27,17 @@ OUTPUT_DIR = REPO_ROOT / os.environ.get("OUTPUT_DIR", "output")
 DISCOVERY_INTERVAL_SEC = float(os.environ.get("DISCOVERY_INTERVAL_SEC", "2.0"))
 CLUSTER_EPS = float(os.environ.get("CLUSTER_EPS", "0.4"))
 CLUSTER_MIN_SAMPLES = int(os.environ.get("CLUSTER_MIN_SAMPLES", "3"))
+# Cosine similarity floor for classifying an in-movie face as a known
+# character during the swap stage. Deliberately a separate, higher bar than
+# CLUSTER_EPS's clustering distance (1.0 - CLUSTER_EPS): clustering can
+# afford to be lenient (a false split just means duplicating a source photo
+# under two numbers), but a lenient match threshold here means putting the
+# wrong character's face on an unrelated person. Measured on this movie: a
+# genuine same-character match against its own cluster centroid scores
+# ~0.8+; an unrelated actor's face that happened to score just over a 0.6
+# floor got misclassified and swapped -- 0.7 leaves clear margin on both
+# sides.
+MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.7"))
 
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
