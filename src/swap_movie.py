@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 from config import (
     MOVIE_PATH, CHARACTERS_DIR, CLUSTERS_JSON, SOURCE_FACES_DIR, OUTPUT_DIR,
-    MATCH_THRESHOLD, SEGMENT_FRAME_COUNT, USE_NVENC,
+    MATCH_THRESHOLD, MAINTAIN_THRESHOLD, SEGMENT_FRAME_COUNT, USE_NVENC,
 )
 import face_engine
 import preflight
@@ -74,12 +74,18 @@ def load_source_faces(face_app):
     return sources
 
 
-def classify(face, centroids):
-    """Returns the best-matching character number, or None if nothing is close enough."""
-    best_number, best_score = None, MATCH_THRESHOLD
+def classify(face, centroids, hint_number=None):
+    """Returns the best-matching character number, or None if nothing is
+    close enough. hint_number (if given) gets the lower MAINTAIN_THRESHOLD
+    instead of MATCH_THRESHOLD -- see tracking.FaceTracker.hint_for.
+    """
+    best_number, best_score = None, None
     for number, centroid in centroids.items():
         score = face_engine.cosine_similarity(face.normed_embedding, centroid)
-        if score > best_score:
+        threshold = MAINTAIN_THRESHOLD if number == hint_number else MATCH_THRESHOLD
+        if score < threshold:
+            continue
+        if best_score is None or score > best_score:
             best_number, best_score = number, score
     return best_number
 
@@ -96,7 +102,8 @@ def process_frame(frame, face_app, centroids, sources, tracker, use_tracking, co
     detected = face_app.get(frame)
     swappable = []
     for face in detected:
-        number = classify(face, centroids)
+        hint = tracker.hint_for(face.kps) if use_tracking else None
+        number = classify(face, centroids, hint_number=hint)
         if number is None:
             counts["unmatched_events"] += 1
             continue

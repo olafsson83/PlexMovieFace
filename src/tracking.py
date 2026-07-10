@@ -59,6 +59,39 @@ class FaceTracker:
             return True
         return self.is_scene_cut(gray)
 
+    def hint_for(self, kps):
+        """Returns the character_number of a currently-tracked face whose
+        last known position is close to `kps`, or None. Call this on a
+        freshly detected face *before* classifying it, and classify with a
+        lower "maintain" threshold for the hinted number specifically.
+
+        A face that's already been confidently identified and is still
+        roughly where it was is much stronger evidence than a single
+        frame's raw score -- a real continuous shot's per-frame embedding
+        is noisier than a clean discovery-crop match and can dip below the
+        "acquire" bar for an instant without the face having changed at
+        all. Re-clearing the full bar on every single detection pass turns
+        that noise into on/off flicker. A face with no prior track nearby
+        still has to clear the full bar, so this can't resurrect a wrong
+        first guess the way carrying forward a whole track could.
+        """
+        for face in self._tracked:
+            if self._same_face(kps, face.kps):
+                return face.character_number
+        return None
+
+    @staticmethod
+    def _same_face(kps_a, kps_b):
+        """True if two kps sets are roughly at the same on-screen spot. The
+        radius scales with kps_a's own spread so it works across video
+        resolutions and face sizes.
+        """
+        spread = kps_a.max(axis=0) - kps_a.min(axis=0)
+        radius = 1.5 * float(np.hypot(*spread)) if spread.any() else 40.0
+        center_a = kps_a.mean(axis=0)
+        center_b = np.asarray(kps_b).mean(axis=0)
+        return np.linalg.norm(center_a - center_b) < radius
+
     def start_from_detection(self, gray, swappable_faces, all_detected_kps=()):
         """Call on a full-detection frame. swappable_faces: list of
         (kps, character_number) pairs for faces that will actually be
@@ -103,24 +136,13 @@ class FaceTracker:
         self._frames_since_detection = 0
         return self._tracked
 
-    @staticmethod
-    def _claimed_by_detection(kps, all_detected_kps):
+    def _claimed_by_detection(self, kps, all_detected_kps):
         """True if some detected face this pass sits roughly where `kps`
         (a previously tracked face) last was -- i.e. detection did examine
         this face, whatever it concluded, so a stale track shouldn't
-        override that. The "same face" radius scales with the tracked
-        face's own kps spread so it works across video resolutions.
+        override that.
         """
-        if not len(all_detected_kps):
-            return False
-        spread = kps.max(axis=0) - kps.min(axis=0)
-        radius = 1.5 * float(np.hypot(*spread)) if spread.any() else 40.0
-        center = kps.mean(axis=0)
-        for other_kps in all_detected_kps:
-            other_center = np.asarray(other_kps).mean(axis=0)
-            if np.linalg.norm(center - other_center) < radius:
-                return True
-        return False
+        return any(self._same_face(kps, other_kps) for other_kps in all_detected_kps)
 
     def track(self, gray):
         """Call on a non-detection frame. Returns the TrackedFace list

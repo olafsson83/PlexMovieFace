@@ -38,6 +38,17 @@ CLUSTER_MIN_SAMPLES = int(os.environ.get("CLUSTER_MIN_SAMPLES", "3"))
 # floor got misclassified and swapped -- 0.7 leaves clear margin on both
 # sides.
 MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.7"))
+# Lower cosine similarity floor applied only to a character that's already
+# being tracked at roughly the same on-screen spot (see tracking.hint_for).
+# A single real, continuous shot's per-frame score is noisier than a clean
+# discovery-crop match and can drift below MATCH_THRESHOLD for a frame or
+# two even though it's clearly the same face throughout (measured range on
+# a real continuous shot: 0.55-0.75) -- re-clearing the full acquire bar on
+# every detection pass made the swap flicker on/off through shots like that.
+# This is the old, pre-decoupling MATCH_THRESHOLD value: it was already a
+# reasonable "is this still probably the same person" bar, just too lenient
+# to be the bar for deciding that in the first place.
+MAINTAIN_THRESHOLD = float(os.environ.get("MAINTAIN_THRESHOLD", "0.6"))
 
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
