@@ -3,7 +3,7 @@ not a stack trace halfway through a multi-hour run.
 """
 from pathlib import Path
 
-from config import MOVIE_PATH, CLUSTERS_JSON, REPO_ROOT
+from config import MOVIE_PATH, CLUSTERS_JSON, REPO_ROOT, CTX_ID
 
 MODEL_PATH = Path.home() / ".insightface" / "models" / "inswapper_128.onnx"
 
@@ -19,13 +19,21 @@ def _ffmpeg_ok():
 
 def diagnose():
     """Full readiness checklist, used by setup.py to show a status report."""
-    return [
+    checks = [
         ((REPO_ROOT / ".env").exists(), ".env file exists"),
         (MOVIE_PATH is not None, "MOVIE_PATH is set"),
         (bool(MOVIE_PATH and MOVIE_PATH.exists()), "Movie file found"),
         (_ffmpeg_ok(), "ffmpeg available"),
         (MODEL_PATH.exists(), "Face-swap model downloaded"),
     ]
+    if CTX_ID >= 0:
+        try:
+            import gpu_runtime
+            gpu_runtime.run_cuda_self_test()
+            checks.append((True, "CUDA/cuDNN convolution test passed on GPU"))
+        except Exception as exc:
+            checks.append((False, f"CUDA/cuDNN convolution test failed: {exc}"))
+    return checks
 
 
 def print_report(checks=None):

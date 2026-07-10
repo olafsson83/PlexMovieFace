@@ -19,6 +19,13 @@ MODEL_URL = "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/model
 MODEL_DIR = Path.home() / ".insightface" / "models"
 MODEL_PATH = MODEL_DIR / "inswapper_128.onnx"
 
+# Pin the GPU stack. ORT's extras otherwise accept any cuDNN 9.x release and
+# started selecting 9.24, whose lazily loaded tensor-IR engine failed with
+# CUDNN_BACKEND_API_FAILED on the reference RTX 4060 Laptop. cuDNN 9.10
+# doesn't ship that engine plugin at all, so this sidesteps the bug entirely.
+ONNXRUNTIME_VERSION = "1.26.0"
+CUDNN_VERSION = "9.10.0.56"
+
 
 def ask(prompt, default=None):
     suffix = f" [{default}]" if default else ""
@@ -138,10 +145,12 @@ def ensure_onnxruntime(has_gpu):
     additionally needs its own CUDA/cuDNN runtime DLLs -- plain
     `onnxruntime-gpu` does not include them and silently falls back to CPU.
     The `[cuda,cudnn]` extra pulls in NVIDIA's pip-packaged runtime libraries
-    (no CUDA Toolkit installer or NVIDIA developer account needed);
-    face_engine.py calls onnxruntime.preload_dlls() at runtime so those
-    libraries -- which live in their own separate pip packages, not on the
-    normal DLL search path -- actually get found.
+    (no CUDA Toolkit installer or NVIDIA developer account needed); versions
+    are pinned (see ONNXRUNTIME_VERSION/CUDNN_VERSION above) instead of
+    letting pip pick an arbitrary cuDNN 9.x release. gpu_runtime.py registers
+    those packages' DLL directories for the life of the process at runtime --
+    they live in their own separate pip packages, not on the normal DLL
+    search path.
 
     Uninstalling both variants and doing a --force-reinstall of the one we
     want avoids the "module 'onnxruntime' has no attribute 'InferenceSession'"
@@ -152,9 +161,15 @@ def ensure_onnxruntime(has_gpu):
         [sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-gpu"],
         check=False,
     )
-    package = "onnxruntime-gpu[cuda,cudnn]" if has_gpu else "onnxruntime"
+    if has_gpu:
+        packages = [
+            f"onnxruntime-gpu[cuda,cudnn]=={ONNXRUNTIME_VERSION}",
+            f"nvidia-cudnn-cu12=={CUDNN_VERSION}",
+        ]
+    else:
+        packages = [f"onnxruntime=={ONNXRUNTIME_VERSION}"]
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", package],
+        [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", *packages],
         check=True,
     )
     # onnxruntime-gpu's own dependency resolution can pull numpy past the <2

@@ -57,9 +57,8 @@ python run.py
   2 seconds — frequent enough to catch anyone who's on screen for more than a
   few seconds, without scanning literally every frame),
 - ask if you have an NVIDIA GPU and install the matching `onnxruntime` variant
-  (with working CUDA/cuDNN, not just the package — see the sibling repo's
-  README if you want the details on why that distinction matters, and the
-  known GPU limitation noted below),
+  (with working CUDA/cuDNN, not just the package — see "GPU setup and
+  verification" below for the pinned versions and why they matter),
 - check ffmpeg is available (falls back to a bundled copy automatically if
   it's not already on your system),
 - download the face-swap model (~530MB, one-time),
@@ -96,23 +95,30 @@ a 90-minute movie is 130,000+ frames.
   the CPU for tracking/detection work; falls back to `libx264` otherwise —
   always correct, just slower to encode.
 
-### Known limitation: GPU acceleration may silently fall back to CPU
+### GPU setup and verification
 
-On at least one tested machine (NVIDIA RTX 4060 Laptop, recent driver),
-`onnxruntime-gpu`'s cuDNN-9 JIT graph-compilation engine
-(`cudnn_engines_tensor_ir64_9.dll`) fails to initialize with
-`CUDNN_BACKEND_API_FAILED`, and onnxruntime automatically falls back to CPU
-per-operation. **This does not affect correctness** — the fallback is
-automatic and safe — only speed. If you hit this: it was not resolved by
-updating the NVIDIA driver, the Visual C++ Redistributable, doing a clean
-`nvidia-cudnn-cu12` reinstall, forcing `HEURISTIC` conv algorithm search, or
-installing the CUDA Toolkit directly (which as of this writing ships CUDA 13,
-a version mismatch with the pip-packaged CUDA 12 libraries `onnxruntime-gpu`
-actually uses — Windows DLL loading requires exact filename version matches,
-so a v13 Toolkit install doesn't help a v12-targeted build). If your swap
-stage logs `Applied providers: ['CPUExecutionProvider']` instead of
-`CUDAExecutionProvider`, you're hitting this; `--calibrate` will still give
-you an honest number for your actual (CPU-fallback) speed.
+The Windows setup pins ONNX Runtime 1.26 and cuDNN 9.10 instead of allowing
+pip to select an arbitrary future cuDNN 9.x release. A later cuDNN 9.24 was
+found to fail with `CUDNN_BACKEND_API_FAILED` on the reference RTX 4060
+Laptop the first time a real convolution ran — session construction
+succeeded, only actual inference failed, so the failure was easy to miss
+until deep into a long run. cuDNN 9.10 doesn't ship the buggy lazily-loaded
+tensor-IR engine plugin (`cudnn_engines_tensor_ir64_9.dll`) at all, so this
+sidesteps the bug entirely rather than working around it. `gpu_runtime.py`
+also registers the NVIDIA DLL directories for the lifetime of the process
+(so this venv's isolated CUDA/cuDNN wins over any system-wide install).
+
+Setup runs an actual CUDA convolution, not just a provider-availability
+check. Look for `[OK] CUDA/cuDNN convolution test passed on GPU`. When GPU
+mode is selected, runtime CPU fallback is disabled deliberately: a CUDA
+failure stops with an error instead of quietly turning a movie run into a
+20-hour CPU job.
+
+If this project was installed before the pinned GPU stack was added, close
+all PlexMovieFace windows, delete the project's `.venv` folder, pull the
+latest code, and run `setup.bat` again. System-wide CUDA Toolkit
+installations do not need to be removed; the project gives its isolated
+runtime priority.
 
 ## Notes & troubleshooting
 
