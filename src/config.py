@@ -50,6 +50,28 @@ MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.7"))
 # to be the bar for deciding that in the first place.
 MAINTAIN_THRESHOLD = float(os.environ.get("MAINTAIN_THRESHOLD", "0.6"))
 
+# Track-based identity decisions (see identity.py). MATCH_THRESHOLD acts as
+# the "enter" bar and MAINTAIN_THRESHOLD as the "keep" bar unless discovery
+# wrote calibration stats and auto-calibration is on.
+#
+# Required best-vs-second-best margin before a track can acquire an identity.
+# Duplicate clusters mapped to the same source photo don't count as rivals.
+MIN_MARGIN = float(os.environ.get("MIN_MARGIN", "0.08"))
+# Score above enter+this activates a swap instantly; scores between enter and
+# this need CONFIRM_FRAMES consecutive confirming detections first. Two-tier
+# acceptance keeps clean shots swapping from their first frame while a single
+# borderline false positive (the elderly-extra failure) never confirms.
+STRONG_ENTER_MARGIN = float(os.environ.get("STRONG_ENTER_MARGIN", "0.12"))
+CONFIRM_FRAMES = int(os.environ.get("CONFIRM_FRAMES", "3"))
+# Consecutive below-keep detections before an accepted identity is dropped
+# (a clear reclassification to someone else drops it immediately).
+REJECT_FRAMES = int(os.environ.get("REJECT_FRAMES", "4"))
+# Detection passes a track survives without being matched to any face.
+TRACK_MISS_LIMIT = int(os.environ.get("TRACK_MISS_LIMIT", "2"))
+# Derive enter/keep thresholds from discovery's calibration stats when
+# present; set false to force the .env MATCH/MAINTAIN values.
+IDENTITY_AUTO_CALIBRATION = os.environ.get("IDENTITY_AUTO_CALIBRATION", "true").lower() == "true"
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial

@@ -136,5 +136,14 @@ runtime priority.
   (higher = more lenient, groups more loosely) or `CLUSTER_MIN_SAMPLES`
   (lower = counts a character from fewer appearances) in `.env`, then re-run
   discovery.
+- **Who-is-who decisions are made per face track, not per frame**: a face
+  must clear an "enter" bar (instantly if confident, else over several
+  confirming detections) before swapping starts, then stays swapped through
+  briefly degraded frames on a lower "keep" bar, and faces matching nothing
+  well enough are explicitly left alone. The enter/keep bars are derived per
+  movie from discovery's own score statistics (`clusters.json` calibration);
+  for a project discovered before this existed, run
+  `python src/calibrate_clusters.py` once to backfill them, or set
+  `IDENTITY_AUTO_CALIBRATION=false` to force the manual `.env` thresholds.
 - **Want to redo a run from scratch instead of resuming**: delete
   `output/_segments/` before re-running the swap stage.

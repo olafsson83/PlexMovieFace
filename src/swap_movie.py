@@ -34,6 +34,7 @@ from config import (
     MATCH_THRESHOLD, MAINTAIN_THRESHOLD, SEGMENT_FRAME_COUNT, USE_NVENC,
 )
 import face_engine
+import identity
 import preflight
 import tracking
 import video_io
@@ -75,9 +76,9 @@ def load_source_faces(face_app):
 
 
 def classify(face, centroids, hint_number=None):
-    """Returns the best-matching character number, or None if nothing is
-    close enough. hint_number (if given) gets the lower MAINTAIN_THRESHOLD
-    instead of MATCH_THRESHOLD -- see tracking.FaceTracker.hint_for.
+    """Single-frame nearest-centroid lookup, kept for diagnostics. The swap
+    pipeline itself uses identity.TrackIdentityManager, which makes the
+    decision at the track level (hysteresis, margins, confirmation).
     """
     best_number, best_score = None, None
     for number, centroid in centroids.items():
@@ -90,27 +91,18 @@ def classify(face, centroids, hint_number=None):
     return best_number
 
 
-def process_frame(frame, face_app, centroids, sources, tracker, use_tracking, counts):
-    """Classifies/tracks faces in frame and returns the list of TrackedFace
-    to actually swap this frame (empty if none)."""
+def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts):
+    """Runs detection + track-level identity decisions on detection frames,
+    optical-flow tracking in between. Returns the TrackedFace list to swap."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if use_tracking else None
 
     do_full_detection = (not use_tracking) or tracker.due_for_detection(gray)
     if not do_full_detection:
         return tracker.track(gray)
 
+    scene_cut = tracker.is_scene_cut(gray) if use_tracking else False
     detected = face_app.get(frame)
-    swappable = []
-    for face in detected:
-        hint = tracker.hint_for(face.kps) if use_tracking else None
-        number = classify(face, centroids, hint_number=hint)
-        if number is None:
-            counts["unmatched_events"] += 1
-            continue
-        if number not in sources:
-            counts["no_photo_events"] += 1
-            continue
-        swappable.append((face.kps, number))
+    swappable = identity_mgr.observe(detected, scene_cut=scene_cut, counts=counts)
 
     if use_tracking:
         all_kps = [face.kps for face in detected]
@@ -141,7 +133,7 @@ def find_resume_point():
     return completed, completed * SEGMENT_FRAME_COUNT
 
 
-def run_calibration(cap, fps, width, height, face_app, swapper, centroids, sources, use_tracking, seconds):
+def run_calibration(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking, seconds):
     frame_limit = max(1, int(seconds * fps))
     tracker = tracking.FaceTracker()
     counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
@@ -156,7 +148,7 @@ def run_calibration(cap, fps, width, height, face_app, swapper, centroids, sourc
         ret, frame = cap.read()
         if not ret:
             break
-        active_faces = process_frame(frame, face_app, centroids, sources, tracker, use_tracking, counts)
+        active_faces = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
         swap_and_write(frame, active_faces, sources, swapper, encoder, counts)
         processed += 1
     elapsed = time.time() - start
@@ -185,7 +177,7 @@ def run_calibration(cap, fps, width, height, face_app, swapper, centroids, sourc
         print("Could not determine total frame count to project a full-movie estimate.")
 
 
-def run_full(cap, fps, width, height, face_app, swapper, centroids, sources, use_tracking):
+def run_full(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking):
     completed_segments, frames_done = find_resume_point()
     if completed_segments:
         print(f"Resuming: {completed_segments} segment(s) already complete ({frames_done} frames). "
@@ -216,7 +208,7 @@ def run_full(cap, fps, width, height, face_app, swapper, centroids, sources, use
                     if not ret:
                         video_ended = True
                         break
-                    active_faces = process_frame(frame, face_app, centroids, sources, tracker, use_tracking, counts)
+                    active_faces = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
                     swap_and_write(frame, active_faces, sources, swapper, encoder, counts)
                     frames_in_segment += 1
                     progress.update(1)
@@ -281,6 +273,12 @@ def main():
             f"characterN.jpg (matching a number from {CHARACTERS_DIR}) before running this stage."
         )
 
+    manifest = json.loads(CLUSTERS_JSON.read_text(encoding="utf-8"))
+    groups = identity.group_sources(SOURCE_FACES_DIR)
+    thresholds = identity.resolve_thresholds(groups, manifest)
+    identity.describe_thresholds(groups, thresholds)
+    identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+
     swapper = face_engine.build_swapper()
 
     cap = cv2.VideoCapture(str(MOVIE_PATH))
@@ -294,12 +292,12 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.calibrate is not None:
-        run_calibration(cap, fps, width, height, face_app, swapper, centroids, sources, use_tracking, args.calibrate)
+        run_calibration(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking, args.calibrate)
         cap.release()
         return
 
     SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    counts = run_full(cap, fps, width, height, face_app, swapper, centroids, sources, use_tracking)
+    counts = run_full(cap, fps, width, height, face_app, swapper, identity_mgr, sources, use_tracking)
     final_path = finalize_output()
 
     print(

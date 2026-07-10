@@ -69,7 +69,7 @@ def detect_faces(face_app, frames):
 
 def cluster_faces(records):
     if not records:
-        return {}
+        return {}, np.empty((0, 512)), np.empty(0, dtype=int)
 
     embeddings = np.stack([r["embedding"] for r in records])
     labels = DBSCAN(metric="cosine", eps=CLUSTER_EPS, min_samples=CLUSTER_MIN_SAMPLES).fit_predict(embeddings)
@@ -79,7 +79,37 @@ def cluster_faces(records):
         if label == -1:
             continue  # noise -- not enough similar samples to count as a character
         clusters.setdefault(label, []).append(record)
-    return clusters
+    return clusters, embeddings, labels
+
+
+def calibration_stats(label, centroid, embeddings, labels, label_to_number):
+    """Empirical score distributions for the swap stage's threshold
+    calibration (see identity.py). These carry selection bias -- membership
+    was itself decided by a similarity cut -- so identity.py treats them as
+    evidence with safety margins, not ground truth.
+
+    genuine_p10/p50: percentiles of members' similarity to their own centroid.
+    impostor_p99_by_cluster: for every OTHER cluster (plus DBSCAN noise faces
+    under the key "noise"), the 99th percentile of its faces' similarity to
+    THIS centroid -- kept per-cluster so the swap stage can exclude duplicate
+    clusters of the same actor (same source photo) when computing the real
+    impostor tail.
+    """
+    member_sims = embeddings[labels == label] @ centroid
+    impostor_p99 = {}
+    for other in set(labels.tolist()):
+        if other == label:
+            continue
+        sims = embeddings[labels == other] @ centroid
+        if len(sims) == 0:
+            continue
+        key = "noise" if other == -1 else label_to_number[other]
+        impostor_p99[key] = round(float(np.percentile(sims, 99)), 4)
+    return {
+        "genuine_p10": round(float(np.percentile(member_sims, 10)), 4),
+        "genuine_p50": round(float(np.percentile(member_sims, 50)), 4),
+        "impostor_p99_by_cluster": impostor_p99,
+    }
 
 
 def select_representative_samples(members, k=SAMPLES_PER_CHARACTER, min_gap_sec=MIN_SAMPLE_GAP_SEC):
@@ -125,7 +155,7 @@ def crop_face(frame_path, bbox):
     return img[y1:y2, x1:x2]
 
 
-def export_characters(clusters):
+def export_characters(clusters, embeddings, labels):
     CHARACTERS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = {}
     letters = "abcdefghijklmnopqrstuvwxyz"
@@ -133,8 +163,11 @@ def export_characters(clusters):
     # Number clusters 1..N in a stable order (largest cluster first) rather
     # than sklearn's arbitrary label order.
     ordered = sorted(clusters.items(), key=lambda kv: len(kv[1]), reverse=True)
+    label_to_number = {
+        label: str(number) for number, (label, _) in enumerate(ordered, start=1)
+    }
 
-    for character_number, (_, members) in enumerate(ordered, start=1):
+    for character_number, (label, members) in enumerate(ordered, start=1):
         samples, centroid = select_representative_samples(members)
         timestamps = []
         for letter, sample in zip(letters, samples):
@@ -149,6 +182,9 @@ def export_characters(clusters):
             "centroid": centroid.tolist(),
             "member_count": len(members),
             "sample_timestamps": timestamps,
+            "calibration": calibration_stats(
+                label, centroid, embeddings, labels, label_to_number
+            ),
         }
         print(f"  character{character_number}: {len(members)} samples across the movie")
 
@@ -165,7 +201,7 @@ def main():
     records = detect_faces(face_app, frames)
     print(f"Detected {len(records)} qualifying faces across {len(frames)} sampled frames.")
 
-    clusters = cluster_faces(records)
+    clusters, embeddings, labels = cluster_faces(records)
     if not clusters:
         raise SystemExit(
             "No recurring characters found. Try lowering CLUSTER_MIN_SAMPLES or "
@@ -173,7 +209,7 @@ def main():
         )
 
     print(f"Found {len(clusters)} distinct characters.")
-    export_characters(clusters)
+    export_characters(clusters, embeddings, labels)
 
     print(
         f"\nDone. Review the crops in {CHARACTERS_DIR} -- for each character number you "
