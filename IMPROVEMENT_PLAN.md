@@ -1,5 +1,41 @@
 # Plate-matching & identity roadmap
 
+## v2 milestones (from external review, 2026-07-11)
+
+External review verdict, accepted: phases below fixed identity correctness
+and finish quality, but the remaining failures (dark faces, strong profiles)
+live UPSTREAM -- single-pass detection on the unmodified dark frame at fixed
+640px, one centroid per character, five-point alignment, two disjoint
+trackers with no shared track id, forward-only streaming that can't use
+future evidence, and inswapper_128's synthesis ceiling. Known bug from the
+review: plate-matching temporal state is keyed by character_number, not
+(shot_id, track_id) -- same-identity faces can cross-contaminate.
+
+Order of work (each gated on the regression suite not regressing, wrong-
+person swaps weighted as hard failures):
+
+1. DONE -- real-clip regression harness: `python src/evaluate.py` runs the
+   fixture suite in tests/fixtures/manifest.json (clips gitignored, local).
+   Baseline 2026-07-11: all fixtures PASS, 0 wrong-person swaps; coverage
+   hp 967/4500 frames, diehard 479/3596, brokeback 706/720 (0.981).
+2. Analyse-then-render two-pass architecture (analysis artifact on disk;
+   render never re-runs identity logic). Unlocks backward tracking.
+3. Adaptive low-light detection (analysis-only enhancement variants +
+   ROI retries at higher det_size; original plate never altered).
+4. Persistent anonymous tracks with one authoritative track_id shared by
+   identity, motion and plate-matching state (fixes the state-keying bug);
+   Hungarian association on position+embedding+scale; forward-backward.
+5. Pose-diverse prototype banks per character (replace single centroids);
+   two-tier discovery (strict seeds + track-supported expansion faces).
+6. Pose/landmark confidence + explicit "unrenderable frame" decisions.
+7. Swap backend interface; benchmark higher-res backends against the
+   fixture suite (inswapper_128 stays as the fast baseline).
+8. Review/correction interface (track timelines, merge/split, approvals).
+
+---
+
+## v1 history (completed phases)
+
 Goal: make swapped faces (a) never land on the wrong person, and (b) match the
 plate's optical/sensor statistics (motion blur, defocus, grain) so they stop
 reading as "pasted on". Distilled from two expert reviews; where they

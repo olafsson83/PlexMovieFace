@@ -1,0 +1,103 @@
+{
+  "_comment": [
+    "Real-clip regression suite (run: python src/evaluate.py). Clips live in",
+    "tests/fixtures/clips/ (gitignored media; see IMPROVEMENT_PLAN.md for how",
+    "each was cut). Every expectation below encodes an outcome that was",
+    "verified by eye on real runs -- the harness turns those one-off checks",
+    "into repeatable metrics. Frame numbers are 0-based decode order.",
+    "Expectation types:",
+    "  no_swap: no face may be swapped in [frames] (optionally inside region",
+    "           [x0,y0,x1,y1]) -- violations are wrong-person swaps, the",
+    "           hard-failure metric.",
+    "  coverage: fraction of frames in [frames] with >=1 swap (optionally",
+    "           restricted to `numbers`) must reach `min`.",
+    "  min_frames_swapped: total swapped frames per number must reach `min`."
+  ],
+  "fixtures": [
+    {
+      "name": "hp_ron_scene",
+      "clip": "tests/fixtures/clips/hp_3min_ron_test_clip.mp4",
+      "env": {
+        "CHARACTERS_DIR": "characters",
+        "SOURCE_FACES_DIR": "source_faces"
+      },
+      "expectations": [
+        {
+          "type": "no_swap",
+          "frames": [425, 500],
+          "note": "elderly extra (Ollivander) alone on screen t=17-20s; the historical 0.638-vs-Harry false positive"
+        },
+        {
+          "type": "coverage",
+          "frames": [2410, 2450],
+          "numbers": ["1", "22", "24", "25"],
+          "min": 0.6,
+          "note": "genuine Harry, high-confidence shot t=96.4-98s"
+        },
+        {
+          "type": "coverage",
+          "frames": [3510, 3620],
+          "numbers": ["1", "22", "24", "25"],
+          "min": 0.6,
+          "note": "former flicker window t=140-145s, borderline scores 0.63-0.71"
+        }
+      ]
+    },
+    {
+      "name": "diehard_airduct",
+      "clip": "tests/fixtures/clips/diehard_airduct_clip.mp4",
+      "env": {
+        "CHARACTERS_DIR": "characters_diehard",
+        "SOURCE_FACES_DIR": "source_faces_diehard",
+        "MATCH_THRESHOLD": "0.45",
+        "MAINTAIN_THRESHOLD": "0.25"
+      },
+      "expectations": [
+        {
+          "type": "no_swap",
+          "frames": [1555, 1605],
+          "note": "Karl raging alone on screen t~65s -- must never become John"
+        },
+        {
+          "type": "no_swap",
+          "frames": [1900, 1945],
+          "note": "Hans + Karl two-shot t~80s"
+        },
+        {
+          "type": "coverage",
+          "frames": [3261, 3357],
+          "min": 0.7,
+          "note": "rooftop radio call t=136-140s, clear frontal John"
+        },
+        {
+          "type": "coverage",
+          "frames": [815, 863],
+          "min": 0.5,
+          "note": "vent peering shot t=34-36s, recovered by lowered thresholds"
+        }
+      ]
+    },
+    {
+      "name": "brokeback_camp",
+      "clip": "tests/fixtures/clips/brokeback_camp_clip.mp4",
+      "env": {
+        "CHARACTERS_DIR": "characters_brokeback",
+        "SOURCE_FACES_DIR": "source_faces_brokeback"
+      },
+      "expectations": [
+        {
+          "type": "coverage",
+          "frames": [0, 719],
+          "min": 0.85,
+          "note": "well-lit two-hander; near-total coverage expected"
+        },
+        {
+          "type": "min_frames_swapped",
+          "numbers": ["1", "2"],
+          "min": 100,
+          "note": "both Ennis and Jack must actually swap, not just one"
+        }
+      ]
+    }
+  ]
+}
