@@ -25,12 +25,15 @@ LK_PARAMS = dict(
 
 class TrackedFace:
     """Lightweight stand-in for an insightface Face -- swapper.get() only
-    ever reads .kps, so that's all this needs to provide."""
-    __slots__ = ("kps", "character_number")
+    ever reads .kps, so that's all this needs to provide. track_id is the
+    identity manager's stable per-physical-track id, carried through so
+    per-face temporal state downstream is keyed correctly."""
+    __slots__ = ("kps", "character_number", "track_id")
 
-    def __init__(self, kps, character_number):
+    def __init__(self, kps, character_number, track_id=None):
         self.kps = kps
         self.character_number = character_number
+        self.track_id = track_id
 
 
 class FaceTracker:
@@ -121,7 +124,8 @@ class FaceTracker:
         forward if no detected face this pass was even near its last known
         position; if one was, that fresh (possibly negative) result wins.
         """
-        fresh = [TrackedFace(kps.copy(), number) for kps, number in swappable_faces]
+        fresh = [TrackedFace(kps.copy(), number, track_id)
+                 for kps, number, track_id in swappable_faces]
         fresh_numbers = {face.character_number for face in fresh}
 
         still_missing = [

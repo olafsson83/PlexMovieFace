@@ -18,8 +18,19 @@ person swaps weighted as hard failures):
    fixture suite in tests/fixtures/manifest.json (clips gitignored, local).
    Baseline 2026-07-11: all fixtures PASS, 0 wrong-person swaps; coverage
    hp 967/4500 frames, diehard 479/3596, brokeback 706/720 (0.981).
-2. Analyse-then-render two-pass architecture (analysis artifact on disk;
-   render never re-runs identity logic). Unlocks backward tracking.
+2. DONE -- analyse-then-render two-pass architecture. analyze_movie.py
+   writes a versioned swap-plan artifact (frame, track_id, character,
+   landmarks -> <movie>_analysis.npz via analysis_store.py); render_movie.py
+   consumes it and never re-runs identity logic. swap_movie.py orchestrates
+   (--analyze-only / --render-only / --reanalyze; artifact reused when
+   present). The identity manager now mints stable track_ids, threaded
+   through TrackedFace into plate matching, whose temporal state is keyed
+   by track_id instead of character_number -- the review's state-keying bug,
+   fixed early since the plumbing was open (rest of milestone "correct
+   temporal state ownership" lands with real shot ids in milestone 4).
+   Verified: two-pass on the brokeback fixture produces exactly the
+   single-pass baseline's 706 swap decisions; regression suite PASS,
+   0 wrong-person swaps.
 3. Adaptive low-light detection (analysis-only enhancement variants +
    ROI retries at higher det_size; original plate never altered).
 4. Persistent anonymous tracks with one authoritative track_id shared by

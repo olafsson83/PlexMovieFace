@@ -133,7 +133,7 @@ class SharpnessMatcher:
         self.tolerance = tolerance
         self.max_sigma = max_sigma
         self.smoothing = smoothing  # weight on the PREVIOUS smoothed value
-        self._state = {}            # character_number -> (ema_sigma, center)
+        self._state = {}            # track key -> (ema_sigma, center)
         self.applied = []           # per-swap sigmas, for the run summary
 
     def reset(self):
@@ -365,7 +365,7 @@ class GrainMatcher:
         self.max_sigma = max_sigma
         self.min_sigma = min_sigma
         self.smoothing = smoothing
-        self._state = {}       # character_number -> (ema_sigmas, center)
+        self._state = {}       # track key -> (ema_sigmas, center)
         self.applied_y = []    # per-swap applied luma sigma, for the summary
 
     def reset(self):
@@ -476,10 +476,15 @@ class PlateMatcher:
         bgr_fake, M = self.swapper.get(frame, tracked_face, source_face, paste_back=False)
         self._swap_counter += 1
         center = np.asarray(tracked_face.kps).mean(axis=0)
+        # Temporal state belongs to the physical face track, not the semantic
+        # identity -- character_number would conflate appearances across shots
+        # and simultaneous same-identity faces (external-review bug fix).
+        key = tracked_face.track_id if tracked_face.track_id is not None \
+            else tracked_face.character_number
 
         if self.motion is not None:
             bgr_fake, _ = self.motion.blur_crop(
-                bgr_fake, tracked_face.kps, M, tracked_face.character_number, center
+                bgr_fake, tracked_face.kps, M, key, center
             )
 
         if self.sharpness is not None:
@@ -489,7 +494,7 @@ class PlateMatcher:
                 frame, tracked_face.kps, bgr_fake.shape[0]
             )
             sigma = self.sharpness.choose_sigma(
-                plate_crop, bgr_fake, tracked_face.character_number, center
+                plate_crop, bgr_fake, key, center
             )
             self.sharpness.applied.append(sigma)
             if sigma > 0.05:
@@ -503,7 +508,7 @@ class PlateMatcher:
         if self.grain is not None:
             warped_fake = self.grain.match(
                 frame, warped_fake, face_region, mask_size,
-                tracked_face.character_number, center, self._swap_counter,
+                key, center, self._swap_counter,
             )
 
         return composite(frame, warped_fake, soft_mask)

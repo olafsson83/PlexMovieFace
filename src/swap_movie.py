@@ -108,7 +108,8 @@ def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts):
     if use_tracking:
         all_kps = [face.kps for face in detected]
         return tracker.start_from_detection(gray, swappable, all_kps)
-    return [tracking.TrackedFace(kps, number) for kps, number in swappable]
+    return [tracking.TrackedFace(kps, number, track_id)
+            for kps, number, track_id in swappable]
 
 
 def swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts):
@@ -178,56 +179,6 @@ def run_calibration(cap, fps, width, height, face_app, plate_matcher, identity_m
         print("Could not determine total frame count to project a full-movie estimate.")
 
 
-def run_full(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking):
-    completed_segments, frames_done = find_resume_point()
-    if completed_segments:
-        print(f"Resuming: {completed_segments} segment(s) already complete ({frames_done} frames). "
-              "Skipping ahead...")
-        for _ in tqdm(range(frames_done), desc="Skipping to resume point", unit="frame"):
-            if not cap.read()[0]:
-                sys.exit("Movie is shorter than the already-completed segments -- delete output/_segments/ and retry.")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or None
-    tracker = tracking.FaceTracker()
-    counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
-
-    progress = tqdm(total=total_frames, initial=frames_done, desc="Swapping", unit="frame")
-    segment_index = completed_segments
-    video_ended = False
-
-    try:
-        while not video_ended:
-            segment_index += 1
-            segment_final = SEGMENTS_DIR / f"segment_{segment_index:05d}.mp4"
-            segment_tmp = SEGMENTS_DIR / f"segment_{segment_index:05d}.mp4.part"
-            encoder = video_io.open_encoder_pipe(segment_tmp, width, height, fps, use_nvenc=USE_NVENC)
-
-            frames_in_segment = 0
-            try:
-                for _ in range(SEGMENT_FRAME_COUNT):
-                    ret, frame = cap.read()
-                    if not ret:
-                        video_ended = True
-                        break
-                    active_faces = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
-                    swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts)
-                    frames_in_segment += 1
-                    progress.update(1)
-            finally:
-                encoder.stdin.close()
-                encoder.wait()
-
-            if frames_in_segment == 0:
-                segment_tmp.unlink(missing_ok=True)
-                break
-            segment_tmp.rename(segment_final)
-    finally:
-        progress.close()
-        cap.release()
-
-    return counts
-
-
 def finalize_output():
     segments = sorted(SEGMENTS_DIR.glob("segment_*.mp4"))
     if not segments:
@@ -254,60 +205,70 @@ def finalize_output():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Swap the movie using the discovered character mapping")
+    parser = argparse.ArgumentParser(
+        description="Swap the movie: analysis pass (detection/tracking/identity -> "
+                    "swap-plan artifact) followed by the render pass (pixels)."
+    )
     parser.add_argument("--no-tracking", action="store_true",
-                         help="Force full per-frame detection instead of optical-flow tracking (slower, useful for a correctness check)")
+                         help="Force full per-frame detection in the analysis pass (slower, useful for a correctness check)")
     parser.add_argument("--calibrate", nargs="?", const=30.0, type=float, default=None, metavar="SECONDS",
                          help="Process only the first SECONDS (default 30) and project a full-movie runtime instead of doing a full run")
+    parser.add_argument("--analyze-only", action="store_true",
+                         help="Stop after writing the analysis artifact (inspect it before rendering)")
+    parser.add_argument("--render-only", action="store_true",
+                         help="Render from an existing analysis artifact without re-analyzing")
+    parser.add_argument("--reanalyze", action="store_true",
+                         help="Redo the analysis pass even if an artifact already exists")
     args = parser.parse_args()
     use_tracking = not args.no_tracking
 
     preflight.require_ready(need_movie=True, need_ffmpeg=True, need_model=True, need_discovery=True)
 
-    centroids = load_clusters()
     face_app = face_engine.build_face_app()
     sources = load_source_faces(face_app)
-
     if not sources:
         sys.exit(
             f"No source photos found in {SOURCE_FACES_DIR}. Drop in at least one "
             f"characterN.jpg (matching a number from {CHARACTERS_DIR}) before running this stage."
         )
 
-    manifest = json.loads(CLUSTERS_JSON.read_text(encoding="utf-8"))
-    groups = identity.group_sources(SOURCE_FACES_DIR)
-    thresholds = identity.resolve_thresholds(groups, manifest)
-    identity.describe_thresholds(groups, thresholds)
-    identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
-
-    swapper = face_engine.build_swapper()
-    plate_matcher = plate_matching.PlateMatcher(swapper)
-
-    cap = cv2.VideoCapture(str(MOVIE_PATH))
-    if not cap.isOpened():
-        sys.exit(f"Could not open movie file: {MOVIE_PATH}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if args.calibrate is not None:
+        centroids = load_clusters()
+        manifest = json.loads(CLUSTERS_JSON.read_text(encoding="utf-8"))
+        groups = identity.group_sources(SOURCE_FACES_DIR)
+        thresholds = identity.resolve_thresholds(groups, manifest)
+        identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+        plate_matcher = plate_matching.PlateMatcher(face_engine.build_swapper())
+        cap = cv2.VideoCapture(str(MOVIE_PATH))
+        if not cap.isOpened():
+            sys.exit(f"Could not open movie file: {MOVIE_PATH}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         run_calibration(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking, args.calibrate)
         cap.release()
         return
 
-    SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    counts = run_full(cap, fps, width, height, face_app, plate_matcher, identity_mgr, sources, use_tracking)
-    final_path = finalize_output()
+    import analyze_movie
+    import render_movie
 
-    print(f"\n{plate_matcher.summary()}")
-    print(
-        f"Done. {counts['swapped']} faces swapped. {counts['no_photo_events']} recognized-but-unswapped "
-        f"and {counts['unmatched_events']} unrecognized events at full-detection frames (not exhaustive -- "
-        f"tracked frames reuse the last detection's classification). Output: {final_path}"
-    )
+    plan_path = analyze_movie.artifact_path()
+    if args.render_only:
+        if not plan_path.exists():
+            sys.exit(f"--render-only but no analysis artifact at {plan_path}.")
+    elif args.reanalyze or not plan_path.exists():
+        analyze_movie.run_analysis(face_app, sources, use_tracking=use_tracking)
+    else:
+        print(f"Reusing analysis artifact {plan_path} (pass --reanalyze after changing "
+              "thresholds, source photos, or character data).")
+
+    if args.analyze_only:
+        return
+
+    swapper = face_engine.build_swapper()
+    render_movie.run_render(plan_path, sources, swapper)
 
 
 if __name__ == "__main__":

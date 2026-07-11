@@ -125,6 +125,7 @@ def describe_thresholds(groups, thresholds):
 @dataclass
 class _Track:
     kps: np.ndarray
+    track_id: int = -1
     identity: str | None = None         # accepted group id
     identity_number: str | None = None  # concrete cluster number for sources[]
     keep_fails: int = 0
@@ -146,8 +147,12 @@ def _radius(kps):
 
 class TrackIdentityManager:
     """Owns the per-track identity state machine. observe() is called once per
-    full-detection frame with every detected face; it returns the (kps,
-    character_number) pairs that should actually be swapped this frame.
+    full-detection frame with every detected face; it returns (kps,
+    character_number, track_id) triples for the faces that should actually be
+    swapped this frame. track_id is stable for the life of a physical face
+    track and is what downstream per-face temporal state (plate matching)
+    must be keyed by -- NOT character_number, which conflates every
+    appearance of an identity across shots and simultaneous instances.
     """
 
     def __init__(self, centroids, sources, groups, thresholds):
@@ -160,6 +165,7 @@ class TrackIdentityManager:
             self.members.setdefault(gid, []).append(number)
         self.unmapped = [n for n in centroids if n not in groups]
         self._tracks: list[_Track] = []
+        self._next_track_id = 0
 
     def reset(self):
         self._tracks = []
@@ -221,7 +227,9 @@ class TrackIdentityManager:
         for fi, face in enumerate(faces):
             ti = face_to_track.get(fi)
             if ti is None:
-                track = _Track(kps=np.asarray(face.kps).copy())
+                track = _Track(kps=np.asarray(face.kps).copy(),
+                               track_id=self._next_track_id)
+                self._next_track_id += 1
                 self._tracks.append(track)
             else:
                 track = self._tracks[ti]
@@ -285,7 +293,7 @@ class TrackIdentityManager:
                         track.pending_count = 0
 
             if swapped:
-                swappable.append((face.kps, track.identity_number))
+                swappable.append((face.kps, track.identity_number, track.track_id))
             elif counts is not None:
                 best_n = max(scores, key=scores.get) if scores else None
                 if best_n is not None and best_n in self.groups:
