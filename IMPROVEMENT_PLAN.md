@@ -131,14 +131,28 @@ Loss ledger and fixes, in order of return on effort:
    the bridge by construction; cuts can't bridge (new track_id per cut).
    Suite: diehard 432 -> 485, brokeback 651 -> 713 (best ever, reclaiming
    the gate's false positives), hp 953 -> 955; 0 wrong-person.
-2. NEXT -- true-recall measurement: annotate one fixture with "a human can
-   see the face here" ground truth so hit rate gets a meaningful
-   denominator and the remaining loss buckets get sized.
-3. ROI re-detection around predicted track positions (deferred milestone-3
-   half): crop + upscale retries where full-frame enhanced detection still
-   misses.
-4. Adaptive detection cadence (denser detection in marginal shots).
-5. Pose-capable synthesis backend (the profile ceiling; torch stack).
+2. True-recall measurement: annotate one fixture with "a human can see the
+   face here" ground truth so hit rate gets a meaningful denominator.
+   (Partially served by the 5-frame diagnostic of 2026-07-11: the user's
+   pain frames measured as 2x pose-gated at CERTAIN identity 0.74-0.85,
+   1x luma-12 undetectable, 2x junk/borderline embeddings.)
+3. DONE -- ROI re-detection (crop + enhance + 2x upscale around missing
+   track regions, coordinates mapped back). Honest yield: 228 retries on
+   the diehard fixture recovered 9 detections -- bounded cost, small gain.
+4. DONE (v1) -- track-level identity robustness: proven tracks (3+ strong
+   observations) survive 6 missed detection passes instead of 2, weak
+   re-detections resume on the KEEP bar instead of failing cold
+   acquisition, and pending confirmations AGE through sub-enter dips
+   instead of resetting (only a qualifying rival resets them). Safety
+   counterweight: a reacquired track must re-clear KEEP before the
+   below-keep ride-out applies (someone else may have taken the spot).
+   Suite: hp 985 -> 1002 (best ever), brokeback 713 (held), diehard
+   485 -> 475 -- the dip is the reacquisition-proof guard withholding
+   ride-out frames that previously swapped on stale credit; 0 wrong-person
+   throughout.
+5. Pose-capable synthesis backend (the profile ceiling; torch stack) --
+   the only remaining lever for frames where identity is already CERTAIN
+   (measured 0.85) but five-point alignment cannot render the pose.
 
 ## Round-3 external review (tracking safety, integrated 2026-07-11)
 

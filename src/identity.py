@@ -33,6 +33,7 @@ from config import (
     MATCH_THRESHOLD, MAINTAIN_THRESHOLD, MIN_MARGIN, STRONG_ENTER_MARGIN,
     CONFIRM_FRAMES, REJECT_FRAMES, TRACK_MISS_LIMIT, IDENTITY_AUTO_CALIBRATION,
     THRESHOLDS_EXPLICIT, POSE_GATE, MAX_ABS_YAW, POSE_EXIT_MARGIN,
+    PROVEN_TRACK_MISS_LIMIT, PENDING_WINDOW,
 )
 
 # Below this, cosine scores are noise regardless of what calibration says.
@@ -144,10 +145,24 @@ class _Track:
     keep_fails: int = 0
     pending_group: str | None = None
     pending_count: int = 0
+    pending_age: int = 0
     missing: int = 0
     scores: list = field(default_factory=list)  # recent accepted-group scores
     embedding: np.ndarray | None = None  # last observation's embedding
     pose_blocked: bool = False           # currently beyond the renderable yaw range
+    needs_proof: bool = False            # just reacquired after a gap: must
+                                         # clear KEEP before the ride-out applies
+
+    @property
+    def proven(self):
+        """A track whose identity is backed by several strong observations
+        earns longer survival through detection gaps (dark stretches,
+        occlusion) -- see PROVEN_TRACK_MISS_LIMIT."""
+        return self.identity is not None and len(self.scores) >= 3
+
+    @property
+    def miss_limit(self):
+        return PROVEN_TRACK_MISS_LIMIT if self.proven else TRACK_MISS_LIMIT
 
 
 @dataclass
@@ -316,6 +331,11 @@ class TrackIdentityManager:
             else:
                 track = self._tracks[ti]
                 track.kps = np.asarray(face.kps).copy()
+                if track.missing > 0:
+                    # Reacquired after a gap: someone else could have taken
+                    # this spot, so swapping resumes only once the face
+                    # scores >= KEEP again (no below-keep ride-out).
+                    track.needs_proof = True
                 track.missing = 0
             track.embedding = np.asarray(face.normed_embedding, dtype=np.float32)
             touched.add(id(track))
@@ -343,8 +363,10 @@ class TrackIdentityManager:
                 competitor = self._competitor(group_scores, unmapped_best, gid)
                 if s >= t.keep:
                     track.keep_fails = 0
+                    track.needs_proof = False
                     track.identity_number = group_best_number[gid]
                     track.scores.append(s)
+                    del track.scores[:-8]  # bounded history for `proven`
                     swapped = True
                 elif competitor >= t.enter and competitor - s >= MIN_MARGIN:
                     # Clear evidence this face is someone else entirely --
@@ -358,7 +380,7 @@ class TrackIdentityManager:
                         track.identity = None
                         track.identity_number = None
                         track.keep_fails = 0
-                    else:
+                    elif not track.needs_proof:
                         swapped = True  # hysteresis: ride out a brief dip
 
             if track.identity is None and not swapped:
@@ -379,14 +401,25 @@ class TrackIdentityManager:
                         if track.pending_group == best_gid:
                             track.pending_count += 1
                         else:
+                            # A different identity qualifying IS contradicting
+                            # evidence; restart confirmation for the new one.
                             track.pending_group = best_gid
                             track.pending_count = 1
+                            track.pending_age = 0
                         if track.pending_count >= CONFIRM_FRAMES:
                             self._accept(track, best_gid, group_best_number[best_gid], s)
                             swapped = True
-                    else:
-                        track.pending_group = None
-                        track.pending_count = 0
+                    elif track.pending_group is not None:
+                        # Unqualified frames (blur dipping under the enter
+                        # bar) merely AGE a pending candidate instead of
+                        # resetting it -- oscillation around the threshold
+                        # shouldn't restart confirmation from zero. The
+                        # window bounds how long stale pendings survive.
+                        track.pending_age += 1
+                        if track.pending_age > PENDING_WINDOW:
+                            track.pending_group = None
+                            track.pending_count = 0
+                            track.pending_age = 0
 
             if swapped and track.pose_blocked:
                 # Identity evidence is kept (keep-fails cleared, scores
@@ -419,7 +452,7 @@ class TrackIdentityManager:
         for track in self._tracks:
             if id(track) not in touched:
                 track.missing += 1
-        self._tracks = [t for t in self._tracks if t.missing <= TRACK_MISS_LIMIT]
+        self._tracks = [t for t in self._tracks if t.missing <= t.miss_limit]
 
         return swappable
 
@@ -428,7 +461,9 @@ class TrackIdentityManager:
         track.identity_number = number
         track.pending_group = None
         track.pending_count = 0
+        track.pending_age = 0
         track.keep_fails = 0
+        track.needs_proof = False
         track.scores = [score]
 
 

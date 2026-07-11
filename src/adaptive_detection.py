@@ -28,7 +28,7 @@ from insightface.app.common import Face
 
 from config import (
     ADAPTIVE_DETECTION, ADAPTIVE_DARK_LUMA, ADAPTIVE_RETRY_DET_SIZE,
-    ADAPTIVE_GAMMA_MAX,
+    ADAPTIVE_GAMMA_MAX, ADAPTIVE_ROI_RETRY, ADAPTIVE_ROI_UPSCALE,
 )
 
 
@@ -83,7 +83,8 @@ class AdaptiveDetector:
         self.dark_luma = dark_luma
         self.retry_det_size = int(retry_det_size)
         self.identity_mgr = None  # bound after construction (expected regions)
-        self.stats = {"frames": 0, "dark_frames": 0, "retries": 0, "recovered_faces": 0}
+        self.stats = {"frames": 0, "dark_frames": 0, "retries": 0, "recovered_faces": 0,
+                      "roi_retries": 0, "roi_recovered": 0}
 
     def bind(self, identity_mgr):
         self.identity_mgr = identity_mgr
@@ -102,15 +103,16 @@ class AdaptiveDetector:
             regions.append((kps.mean(axis=0), radius))
         return regions
 
-    def _missing_expected(self, faces):
+    def _missing_regions(self, faces):
+        missing = []
         for center, radius in self._expected_regions():
             hit = any(
                 np.linalg.norm(np.asarray(f.kps).mean(axis=0) - center) < radius
                 for f in faces
             )
             if not hit:
-                return True
-        return False
+                missing.append((center, radius))
+        return missing
 
     def _detect_enhanced(self, frame):
         enhanced = enhance_for_analysis(frame)
@@ -129,6 +131,38 @@ class AdaptiveDetector:
             faces.append(face)
         return faces
 
+    def _detect_roi(self, frame, center, radius):
+        """Crop the missing track region, enhance + upscale it, and detect
+        there -- a face too small or too blurred for the full-frame canvas
+        can still resolve on a magnified crop. All coordinates are mapped
+        back to original-frame space; the crop exists for analysis only.
+        """
+        h, w = frame.shape[:2]
+        r = max(radius * 2.0, 48.0)
+        x0, y0 = int(max(0, center[0] - r)), int(max(0, center[1] - r))
+        x1, y1 = int(min(w, center[0] + r)), int(min(h, center[1] + r))
+        if x1 - x0 < 32 or y1 - y0 < 32:
+            return []
+        crop = enhance_for_analysis(frame[y0:y1, x0:x1])
+        up = cv2.resize(crop, None, fx=ADAPTIVE_ROI_UPSCALE, fy=ADAPTIVE_ROI_UPSCALE,
+                        interpolation=cv2.INTER_CUBIC)
+        bboxes, kpss = self.face_app.det_model.detect(up, input_size=(640, 640))
+        faces = []
+        for i in range(bboxes.shape[0]):
+            face = Face(bbox=bboxes[i, 0:4], kps=kpss[i], det_score=bboxes[i, 4])
+            for taskname, model in self.face_app.models.items():
+                if taskname == "detection":
+                    continue
+                model.get(up, face)  # landmarks/embedding read the crop
+            offset = np.array([x0, y0], dtype=np.float32)
+            face.kps = face.kps / ADAPTIVE_ROI_UPSCALE + offset
+            face.bbox = np.concatenate([
+                face.bbox[:2] / ADAPTIVE_ROI_UPSCALE + offset,
+                face.bbox[2:4] / ADAPTIVE_ROI_UPSCALE + offset,
+            ])
+            faces.append(face)
+        return faces
+
     def get(self, frame):
         base = self.face_app.get(frame)
         if not self.enabled:
@@ -139,13 +173,22 @@ class AdaptiveDetector:
         dark = luma < self.dark_luma
         if dark:
             self.stats["dark_frames"] += 1
-        if not dark or (base and not self._missing_expected(base)):
+        if not dark or (base and not self._missing_regions(base)):
             return base
 
         self.stats["retries"] += 1
         retry = self._detect_enhanced(frame)
         merged = merge_detections(base, retry)
         self.stats["recovered_faces"] += len(merged) - len(base)
+
+        if ADAPTIVE_ROI_RETRY:
+            for center, radius in self._missing_regions(merged):
+                self.stats["roi_retries"] += 1
+                roi_faces = self._detect_roi(frame, center, radius)
+                if roi_faces:
+                    before = len(merged)
+                    merged = merge_detections(merged, roi_faces)
+                    self.stats["roi_recovered"] += len(merged) - before
         return merged
 
     def summary(self):
@@ -154,5 +197,6 @@ class AdaptiveDetector:
             return "adaptive detection: disabled"
         return (
             f"adaptive detection: {s['retries']} retries on {s['dark_frames']} dark "
-            f"frames (of {s['frames']}), {s['recovered_faces']} extra faces recovered"
+            f"frames (of {s['frames']}), {s['recovered_faces']} extra faces recovered; "
+            f"{s['roi_retries']} ROI retries recovered {s['roi_recovered']} more"
         )

@@ -130,6 +130,24 @@ ADAPTIVE_DARK_LUMA = float(os.environ.get("ADAPTIVE_DARK_LUMA", "60"))
 ADAPTIVE_RETRY_DET_SIZE = int(os.environ.get("ADAPTIVE_RETRY_DET_SIZE", "960"))
 # Cap on the adaptive gamma lift (1.0 = no lift).
 ADAPTIVE_GAMMA_MAX = float(os.environ.get("ADAPTIVE_GAMMA_MAX", "2.2"))
+# ROI retry: when a live track's region still has no detection after the
+# full-frame retry, crop that region, upscale it, and detect there --
+# recovers small/blurred faces the full-frame canvas loses.
+ADAPTIVE_ROI_RETRY = os.environ.get("ADAPTIVE_ROI_RETRY", "true").lower() == "true"
+ADAPTIVE_ROI_UPSCALE = float(os.environ.get("ADAPTIVE_ROI_UPSCALE", "2.0"))
+
+# Hit-rate step 4: tracks with a well-established identity (several strong
+# observations) survive longer detection gaps before dying -- a proven
+# track bridging a dark stretch lets weak re-detections resume on the KEEP
+# bar instead of failing cold acquisition. On reacquisition after a gap the
+# track must prove itself (score >= keep) before swapping resumes; the
+# below-keep ride-out never applies to a freshly reacquired track.
+PROVEN_TRACK_MISS_LIMIT = int(os.environ.get("PROVEN_TRACK_MISS_LIMIT", "6"))
+# A pending (unconfirmed) identity candidate survives this many detection
+# passes; confirming observations need not be strictly consecutive. Only
+# contradicting evidence (a rival identity qualifying) resets it early --
+# blur oscillating around the enter bar shouldn't restart confirmation.
+PENDING_WINDOW = int(os.environ.get("PENDING_WINDOW", "6"))
 
 # v2 milestone 6: refuse to swap frames the backend can't render well
 # instead of quietly producing a bad warped profile. inswapper_128's
