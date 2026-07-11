@@ -465,15 +465,25 @@ class PlateMatcher:
     the merge because it's a sensor/encode phenomenon layered on top of
     all optics."""
 
-    def __init__(self, swapper):
-        self.swapper = swapper
+    def __init__(self, backend):
+        # Accepts a FaceSwapBackend (swap_backend.py); a raw INSwapper is
+        # wrapped for backward compatibility with older call sites.
+        if not hasattr(backend, "swap"):
+            from swap_backend import InswapperBackend
+            backend = InswapperBackend(backend)
+        self.backend = backend
         self.motion = MotionBlurMatcher() if MOTION_BLUR_MATCHING else None
         self.sharpness = SharpnessMatcher() if SHARPNESS_MATCHING else None
         self.grain = GrainMatcher() if GRAIN_MATCHING else None
         self._swap_counter = 0
+        self._prepared = {}  # id(source_face) -> backend-prepared source
 
     def swap(self, frame, tracked_face, source_face):
-        bgr_fake, M = self.swapper.get(frame, tracked_face, source_face, paste_back=False)
+        prepared = self._prepared.get(id(source_face))
+        if prepared is None:
+            prepared = self.backend.prepare_source(source_face)
+            self._prepared[id(source_face)] = prepared
+        bgr_fake, M = self.backend.swap(frame, tracked_face, prepared)
         self._swap_counter += 1
         center = np.asarray(tracked_face.kps).mean(axis=0)
         # Temporal state belongs to the physical face track, not the semantic

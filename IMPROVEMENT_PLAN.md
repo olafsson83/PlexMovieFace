@@ -95,8 +95,17 @@ person swaps weighted as hard failures):
    and MAX_ABS_YAW are .env-tunable if samples argue for a looser limit.
    Still open: landmark confidence, occlusion estimates, per-backend
    support ranges (milestone 7).
-7. Swap backend interface; benchmark higher-res backends against the
-   fixture suite (inswapper_128 stays as the fast baseline).
+7. DONE (interface + baseline) -- swap backend interface (swap_backend.py):
+   prepare_source / swap / capabilities, factory keyed by SWAP_BACKEND.
+   PlateMatcher consumes the interface (raw INSwapper still accepted and
+   auto-wrapped). benchmark_backends.py measures a backend on real footage:
+   identity survival (composited-face embedding vs source), crop sharpness,
+   swap+composite latency. Baseline recorded on the brokeback fixture,
+   47 swaps: identity similarity 0.853 mean / 0.826 p10, crop lap-var 148,
+   135 ms/swap. Candidates (higher-res synthesis or an ONNX face-enhancer
+   chained after inswapper) must beat this on the same numbers -- no
+   backend is accepted on screenshots. Smoke-verified: two-pass render
+   through the interface reproduces the plan exactly (703 swaps).
 8. Review/correction interface (track timelines, merge/split, approvals).
 
 ---

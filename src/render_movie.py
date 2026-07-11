@@ -11,6 +11,7 @@ from tqdm import tqdm
 from config import MOVIE_PATH, OUTPUT_DIR, SEGMENT_FRAME_COUNT, USE_NVENC
 import analysis_store
 import plate_matching
+import swap_backend
 import tracking
 import video_io
 
@@ -22,7 +23,9 @@ def run_render(plan_path, sources, swapper):
     if header["movie_path"] != str(MOVIE_PATH):
         print(f"  note: artifact was analyzed from {header['movie_path']}")
 
-    plate_matcher = plate_matching.PlateMatcher(swapper)
+    backend = swap_backend.build_backend(swapper)
+    print(f"  swap backend: {backend.capabilities()}")
+    plate_matcher = plate_matching.PlateMatcher(backend)
 
     cap = cv2.VideoCapture(str(MOVIE_PATH))
     if not cap.isOpened():
