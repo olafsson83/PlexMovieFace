@@ -37,6 +37,9 @@ from config import (
     SHARPNESS_TEMPORAL_SMOOTHING,
     GRAIN_MATCHING, GRAIN_MAX_SIGMA, GRAIN_MIN_SIGMA,
     GRAIN_TEMPORAL_SMOOTHING, GRAIN_EDGE_REJECT_PERCENTILE,
+    MOTION_BLUR_MATCHING, MOTION_MIN_DISPLACEMENT_PX, MOTION_SHUTTER_FRACTION,
+    MOTION_MAX_CROP_FRACTION, MOTION_TEMPORAL_SMOOTHING,
+    MOTION_MIN_INLIER_RATIO, MOTION_ROTATION_LIMIT_DEG,
 )
 
 SIGMA_CANDIDATES = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
@@ -216,6 +219,133 @@ def robust_noise_sigmas(bgr, sample_mask, edge_reject_pct=GRAIN_EDGE_REJECT_PERC
     return np.array(sigmas, dtype=np.float32)
 
 
+class MotionBlurMatcher:
+    """Directional blur from landmark motion, applied to the generated crop
+    BEFORE the sharpness matcher measures it -- the plate's sharpness
+    reading already contains its motion smear, so matching total sharpness
+    first and then adding motion blur would double-blur.
+
+    Deliberately conservative: wrong blur is more visibly destructive than
+    missing blur. The estimate comes from a RANSAC partial-affine fit over
+    the 5 tracked landmarks; it's damped or disabled when rotation
+    dominates (a face-wide linear PSF can't represent rotational smear),
+    when inliers are poor, or when the displacement is a tracker glitch
+    (hard length cap). Blur length = displacement x shutter fraction
+    (180-degree shutter default): inter-frame displacement is NOT the
+    exposure displacement. The motion vector is EMA-smoothed, which also
+    smooths the kernel angle and damps sign flips from tracking noise.
+    """
+
+    def __init__(self, shutter_fraction=MOTION_SHUTTER_FRACTION,
+                 min_displacement=MOTION_MIN_DISPLACEMENT_PX,
+                 max_crop_fraction=MOTION_MAX_CROP_FRACTION,
+                 smoothing=MOTION_TEMPORAL_SMOOTHING,
+                 min_inlier_ratio=MOTION_MIN_INLIER_RATIO,
+                 rotation_limit_deg=MOTION_ROTATION_LIMIT_DEG):
+        self.shutter_fraction = shutter_fraction
+        self.min_displacement = min_displacement
+        self.max_crop_fraction = max_crop_fraction
+        self.smoothing = smoothing
+        self.min_inlier_ratio = min_inlier_ratio
+        self.rotation_limit_deg = rotation_limit_deg
+        self._state = {}       # key -> (prev_kps, ema_crop_vector)
+        self.applied = []      # applied crop-space blur lengths, for summary
+
+    def reset(self):
+        self._state.clear()
+
+    def _frame_motion(self, prev_kps, kps):
+        """Frame-space exposure-motion vector from consecutive landmarks,
+        with RANSAC/rotation/residual guards. Returns (dx, dy) or None."""
+        prev = np.asarray(prev_kps, dtype=np.float32)
+        cur = np.asarray(kps, dtype=np.float32)
+        A, inliers = cv2.estimateAffinePartial2D(prev, cur, method=cv2.RANSAC,
+                                                 ransacReprojThreshold=2.0)
+        if A is None or inliers is None:
+            return None
+        inlier_ratio = float(inliers.sum()) / len(prev)
+        if inlier_ratio < self.min_inlier_ratio:
+            return None
+
+        motion = cur.mean(axis=0) - prev.mean(axis=0)
+        if np.linalg.norm(motion) < self.min_displacement:
+            return None
+
+        rotation_deg = abs(np.degrees(np.arctan2(A[1, 0], A[0, 0])))
+        predicted = prev @ A[:, :2].T + A[:, 2]
+        residual = float(np.linalg.norm(predicted - cur, axis=1).mean())
+        damp = self.shutter_fraction
+        if rotation_deg > self.rotation_limit_deg or residual > 2.5:
+            damp *= 0.25  # rotation/deformation-dominant: barely trust it
+        return motion * damp
+
+    def blur_crop(self, bgr_fake, kps, M, key, center):
+        """Returns (possibly blurred crop, applied crop-space length)."""
+        prev = self._state.get(key)
+        crop_vec = None
+
+        if prev is not None and np.linalg.norm(center - prev[0].mean(axis=0)) < SMOOTHING_RESET_DISTANCE:
+            frame_vec = self._frame_motion(prev[0], kps)
+            if frame_vec is not None:
+                # Into crop space through the alignment's linear part, so the
+                # kernel is built where the blur is applied.
+                crop_vec = M[:, :2] @ frame_vec
+            else:
+                crop_vec = np.zeros(2, dtype=np.float32)
+            ema = prev[1]
+            if ema is not None:
+                crop_vec = (1 - self.smoothing) * crop_vec + self.smoothing * ema
+        # else: new track / jump -- no motion evidence yet, no blur.
+
+        self._state[key] = (np.asarray(kps, dtype=np.float32).copy(),
+                            None if crop_vec is None else crop_vec.copy())
+
+        if crop_vec is None:
+            self.applied.append(0.0)
+            return bgr_fake, 0.0
+
+        max_len = bgr_fake.shape[0] * self.max_crop_fraction
+        length = float(np.linalg.norm(crop_vec))
+        if length > max_len:
+            crop_vec = crop_vec * (max_len / length)
+            length = max_len
+        if length < 1.5:  # sub-1.5px linear PSF is a no-op
+            self.applied.append(0.0)
+            return bgr_fake, 0.0
+
+        kernel = self._linear_kernel(crop_vec)
+        self.applied.append(length)
+        return cv2.filter2D(bgr_fake, -1, kernel), length
+
+    @staticmethod
+    def _linear_kernel(vec):
+        n = int(np.ceil(np.linalg.norm(vec))) | 1  # odd
+        n = max(n, 3)
+        kernel = np.zeros((n, n), dtype=np.float32)
+        c = (n - 1) / 2.0
+        half = np.asarray(vec, dtype=np.float64) / 2.0
+        p0 = (int(round(c - half[0])), int(round(c - half[1])))
+        p1 = (int(round(c + half[0])), int(round(c + half[1])))
+        cv2.line(kernel, p0, p1, 1.0, 1)
+        total = kernel.sum()
+        if total == 0:
+            kernel[int(c), int(c)] = 1.0
+            total = 1.0
+        return kernel / total
+
+    def summary(self):
+        if not self.applied:
+            return "motion blur: no faces processed"
+        arr = np.array(self.applied)
+        engaged = arr[arr > 0]
+        if not len(engaged):
+            return f"motion blur: 0/{len(arr)} swaps blurred (static faces)"
+        return (
+            f"motion blur: {len(engaged)}/{len(arr)} swaps blurred "
+            f"(mean length {engaged.mean():.2f}px, max {arr.max():.2f}px in crop space)"
+        )
+
+
 class GrainMatcher:
     """Adds the plate's missing noise texture to the generated layer in
     frame space (crop space would rescale the noise spectrum by the warp).
@@ -330,13 +460,14 @@ class GrainMatcher:
 
 class PlateMatcher:
     """Orchestrates swap inference + plate matching + compositing, in
-    pipeline order: (later: motion blur) -> residual sharpness in crop
-    space -> warp to frame space -> grain -> composite. Grain is terminal
-    before the merge because it's a sensor/encode phenomenon layered on top
-    of all optics."""
+    pipeline order: motion blur -> residual sharpness in crop space ->
+    warp to frame space -> grain -> composite. Grain is terminal before
+    the merge because it's a sensor/encode phenomenon layered on top of
+    all optics."""
 
     def __init__(self, swapper):
         self.swapper = swapper
+        self.motion = MotionBlurMatcher() if MOTION_BLUR_MATCHING else None
         self.sharpness = SharpnessMatcher() if SHARPNESS_MATCHING else None
         self.grain = GrainMatcher() if GRAIN_MATCHING else None
         self._swap_counter = 0
@@ -345,6 +476,11 @@ class PlateMatcher:
         bgr_fake, M = self.swapper.get(frame, tracked_face, source_face, paste_back=False)
         self._swap_counter += 1
         center = np.asarray(tracked_face.kps).mean(axis=0)
+
+        if self.motion is not None:
+            bgr_fake, _ = self.motion.blur_crop(
+                bgr_fake, tracked_face.kps, M, tracked_face.character_number, center
+            )
 
         if self.sharpness is not None:
             # The plate must be measured from the UNswapped frame; frame is
@@ -374,6 +510,8 @@ class PlateMatcher:
 
     def summary(self):
         parts = []
+        if self.motion is not None:
+            parts.append(self.motion.summary())
         if self.sharpness is not None:
             parts.append(self.sharpness.summary())
         if self.grain is not None:

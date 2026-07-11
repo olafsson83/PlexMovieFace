@@ -69,17 +69,22 @@ were identity failures (the elderly-extra bug), not optics.
    - Gotcha for posterity: cv2.cvtColor on float32 assumes [0,1] range with
      0.5 chroma offset -- YCrCb round-trips must go through uint8.
 
-4. **Motion blur** (last — wrong blur is more destructive than missing blur)
-   - Landmark-based partial-affine motion (RANSAC), not one centroid vector;
-     translation-dominant cases get a linear PSF, rotation-dominant cases are
-     damped and flagged.
-   - Blur length = displacement x shutter_fraction (default 0.5, configurable)
-     x calibration factor, capped at a fraction of face width; zero below a
-     displacement floor or when inlier ratio is poor.
-   - Pipeline order: motion blur first, then the sharpness matcher adds only
-     the *residual* isotropic blur needed — the plate measurement already
-     contains motion smear, so matching total sharpness first and then adding
-     motion blur would double-blur.
+4. **Motion blur** (done)
+   - Landmark-based partial-affine motion (RANSAC over the 5 tracked kps);
+     translation-dominant cases get a linear PSF built in crop space (the
+     alignment's linear part transforms the frame-space motion vector, so
+     kernel and application share a space); rotation-dominant or
+     high-residual cases are damped to 25%, low inlier ratio disables.
+   - Blur length = displacement x shutter fraction (0.5 default -- the
+     inter-frame displacement is NOT the exposure displacement), capped at
+     8% of crop size, zero below 0.75px displacement; the motion VECTOR is
+     EMA-smoothed so the angle smooths with it and a stop decays rather
+     than snaps.
+   - Applied before the sharpness matcher measures the crop, so that pass
+     adds only the residual isotropic blur (no double-count of the plate's
+     motion smear).
+   - Measured on the Die Hard vent clip: 76/479 swaps blurred (mean 2.75px,
+     max 5.88px, capped); static close-ups untouched.
 
 5. **Quality dashboard**
    - Per-frame CSV (scores, margins, decisions, sigma, motion, noise) +

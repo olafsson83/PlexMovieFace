@@ -94,6 +94,26 @@ GRAIN_TEMPORAL_SMOOTHING = float(os.environ.get("GRAIN_TEMPORAL_SMOOTHING", "0.7
 # estimating plate noise (their residuals are structure, not noise).
 GRAIN_EDGE_REJECT_PERCENTILE = float(os.environ.get("GRAIN_EDGE_REJECT_PERCENTILE", "75"))
 
+# Phase 5: directional motion blur on the generated face. The swap is
+# synthesized sharp even when the plate face smeared during the exposure;
+# landmark motion between consecutive frames drives a linear PSF. Applied
+# BEFORE sharpness matching so that pass only adds the residual.
+MOTION_BLUR_MATCHING = os.environ.get("MOTION_BLUR_MATCHING", "true").lower() == "true"
+# Frame-space displacement below this is treated as static (no blur).
+MOTION_MIN_DISPLACEMENT_PX = float(os.environ.get("MOTION_MIN_DISPLACEMENT_PX", "0.75"))
+# Exposure fraction of the frame interval (180-degree shutter = 0.5).
+MOTION_SHUTTER_FRACTION = float(os.environ.get("MOTION_SHUTTER_FRACTION", "0.5"))
+# Blur length cap as a fraction of the aligned crop size -- a tracker glitch
+# must not paint a 30px streak.
+MOTION_MAX_CROP_FRACTION = float(os.environ.get("MOTION_MAX_CROP_FRACTION", "0.08"))
+# EMA weight on the previous smoothed motion vector (angle smooths with it).
+MOTION_TEMPORAL_SMOOTHING = float(os.environ.get("MOTION_TEMPORAL_SMOOTHING", "0.65"))
+# Below this RANSAC inlier fraction the motion estimate is untrusted.
+MOTION_MIN_INLIER_RATIO = float(os.environ.get("MOTION_MIN_INLIER_RATIO", "0.7"))
+# Rotation (degrees/frame) above which the single-kernel model is damped;
+# a face-wide linear PSF can't represent rotational smear.
+MOTION_ROTATION_LIMIT_DEG = float(os.environ.get("MOTION_ROTATION_LIMIT_DEG", "3.0"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial
