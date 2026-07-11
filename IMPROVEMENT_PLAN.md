@@ -82,7 +82,19 @@ person swaps weighted as hard failures):
    than the bank size self-score genuine_p10 = 1.0 (harmless -- thresholds
    anchor on impostor tails). Still open: two-tier discovery (strict seeds
    + track-supported expansion faces).
-6. Pose/landmark confidence + explicit "unrenderable frame" decisions.
+6. DONE (v1) -- pose gate / unrenderable frames. buffalo_l's 3D landmark
+   model already computes head pose per detection (free); observations past
+   MAX_ABS_YAW (default 65 deg) are marked unrenderable: the track keeps
+   its identity and evidence, but no swap row is emitted -- a brief
+   original face beats a broken five-point profile warp. Hysteresis
+   (re-enable below limit - 8 deg) prevents flicker at the boundary;
+   backfill refuses to fill across unrenderable observations. Measured
+   trade (deliberate coverage reduction, awaiting operator judgment on
+   samples): diehard 613 -> 510 frames (extreme-yaw vent crawling), hp
+   985 -> 967, brokeback unchanged; suite PASS, 0 wrong-person. POSE_GATE
+   and MAX_ABS_YAW are .env-tunable if samples argue for a looser limit.
+   Still open: landmark confidence, occlusion estimates, per-backend
+   support ranges (milestone 7).
 7. Swap backend interface; benchmark higher-res backends against the
    fixture suite (inswapper_128 stays as the fast baseline).
 8. Review/correction interface (track timelines, merge/split, approvals).

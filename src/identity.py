@@ -32,7 +32,7 @@ import face_engine
 from config import (
     MATCH_THRESHOLD, MAINTAIN_THRESHOLD, MIN_MARGIN, STRONG_ENTER_MARGIN,
     CONFIRM_FRAMES, REJECT_FRAMES, TRACK_MISS_LIMIT, IDENTITY_AUTO_CALIBRATION,
-    THRESHOLDS_EXPLICIT,
+    THRESHOLDS_EXPLICIT, POSE_GATE, MAX_ABS_YAW, POSE_EXIT_MARGIN,
 )
 
 # Below this, cosine scores are noise regardless of what calibration says.
@@ -147,6 +147,7 @@ class _Track:
     missing: int = 0
     scores: list = field(default_factory=list)  # recent accepted-group scores
     embedding: np.ndarray | None = None  # last observation's embedding
+    pose_blocked: bool = False           # currently beyond the renderable yaw range
 
 
 @dataclass
@@ -160,6 +161,14 @@ class Observation:
     group_scores: dict           # group id -> best member score this frame
     swapped_number: str | None   # number swapped this frame, else None
     accepted_group: str | None   # track's accepted group AFTER this frame
+    renderable: bool = True      # False when the pose gate blocked this frame
+
+
+def _face_yaw(face):
+    pose = getattr(face, "pose", None)
+    if pose is None:
+        return None
+    return float(pose[1])  # insightface order: pitch, yaw, roll
 
 
 def _center(kps):
@@ -311,6 +320,19 @@ class TrackIdentityManager:
             track.embedding = np.asarray(face.normed_embedding, dtype=np.float32)
             touched.add(id(track))
 
+            # Pose gate with hysteresis: block past MAX_ABS_YAW, unblock only
+            # once safely back inside the range. A blocked frame is
+            # "unrenderable" -- the track keeps its identity and evidence,
+            # but no swap row is emitted (a brief original face beats a
+            # broken five-point profile warp).
+            yaw = _face_yaw(face) if POSE_GATE else None
+            if yaw is not None:
+                if track.pose_blocked:
+                    if abs(yaw) < MAX_ABS_YAW - POSE_EXIT_MARGIN:
+                        track.pose_blocked = False
+                elif abs(yaw) > MAX_ABS_YAW:
+                    track.pose_blocked = True
+
             scores, group_scores, group_best_number, unmapped_best = self._score(face)
             swapped = False
 
@@ -366,6 +388,13 @@ class TrackIdentityManager:
                         track.pending_group = None
                         track.pending_count = 0
 
+            if swapped and track.pose_blocked:
+                # Identity evidence is kept (keep-fails cleared, scores
+                # recorded); only the render is withheld.
+                swapped = False
+                if counts is not None:
+                    counts["unrenderable_events"] = counts.get("unrenderable_events", 0) + 1
+
             if swapped:
                 swappable.append((face.kps, track.identity_number, track.track_id))
             elif counts is not None:
@@ -383,6 +412,7 @@ class TrackIdentityManager:
                     group_scores=dict(group_scores),
                     swapped_number=track.identity_number if swapped else None,
                     accepted_group=track.identity,
+                    renderable=not track.pose_blocked,
                 ))
 
         # Age out tracks no detection claimed this pass.
@@ -442,8 +472,8 @@ def backfill_swap_rows(observation_log, thresholds, max_gap_frames):
         anchors = [obs_list[accept_i]]
         for obs in reversed(obs_list[:accept_i]):
             score = obs.group_scores.get(gid, -1.0)
-            if score < keep:
-                break
+            if score < keep or not obs.renderable:
+                break  # weak evidence or pose-gated: don't fill across it
             if anchors[0].frame_index - obs.frame_index > max_gap_frames:
                 break
             anchors.insert(0, obs)

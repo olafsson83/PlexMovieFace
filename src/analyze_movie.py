@@ -91,6 +91,7 @@ def run_analysis(face_app, sources, use_tracking=True):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = analysis_store.save_plan(artifact_path(), header, rows)
     print(detector.summary())
+    print(f"pose gate: {counts.get('unrenderable_events', 0)} unrenderable detections withheld")
     print(f"retroactive backfill: {len(backfill)} pre-confirmation frames recovered")
     print(f"Analysis complete: {len(rows)} swap decisions across {frame_i} frames -> {path}")
     return path

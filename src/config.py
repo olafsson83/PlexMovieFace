@@ -131,6 +131,18 @@ ADAPTIVE_RETRY_DET_SIZE = int(os.environ.get("ADAPTIVE_RETRY_DET_SIZE", "960"))
 # Cap on the adaptive gamma lift (1.0 = no lift).
 ADAPTIVE_GAMMA_MAX = float(os.environ.get("ADAPTIVE_GAMMA_MAX", "2.2"))
 
+# v2 milestone 6: refuse to swap frames the backend can't render well
+# instead of quietly producing a bad warped profile. inswapper_128's
+# five-point alignment degrades hard past strong yaw; an original face for
+# a few frames beats a broken swap.
+POSE_GATE = os.environ.get("POSE_GATE", "true").lower() == "true"
+# |yaw| in degrees beyond which an observation is unrenderable.
+MAX_ABS_YAW = float(os.environ.get("MAX_ABS_YAW", "65"))
+# Hysteresis: a blocked track becomes renderable again below
+# MAX_ABS_YAW - POSE_EXIT_MARGIN, so yaw oscillating at the limit doesn't
+# flicker the swap on and off.
+POSE_EXIT_MARGIN = float(os.environ.get("POSE_EXIT_MARGIN", "8"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial
