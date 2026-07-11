@@ -14,7 +14,12 @@ anything else, so no point spending optical-flow work on it.
 import cv2
 import numpy as np
 
-from config import DETECT_EVERY_N_FRAMES, SCENE_CUT_THRESHOLD
+from config import (
+    DETECT_EVERY_N_FRAMES, SCENE_CUT_THRESHOLD, TRACK_FLOW_QUALITY_GATE,
+    TRACK_MAX_FB_ERROR_PX, TRACK_MAX_AFFINE_RESIDUAL_PX,
+    TRACK_MIN_FRAME_SCALE, TRACK_MAX_FRAME_SCALE,
+    TRACK_MAX_FRAME_ROTATION_DEG,
+)
 
 LK_PARAMS = dict(
     winSize=(21, 21),
@@ -42,6 +47,13 @@ class FaceTracker:
         self._prev_gray = None
         self._frames_since_detection = 0
         self._detect_every_n_frames = detect_every_n_frames
+        self.stats = {
+            "flow_attempts": 0,
+            "flow_rejected_status": 0,
+            "flow_rejected_fb": 0,
+            "flow_rejected_geometry": 0,
+            "scene_cut_tracks_cleared": 0,
+        }
 
     def is_scene_cut(self, gray):
         """Checks the given frame against the last frame this tracker saw."""
@@ -95,7 +107,8 @@ class FaceTracker:
         center_b = np.asarray(kps_b).mean(axis=0)
         return np.linalg.norm(center_a - center_b) < radius
 
-    def start_from_detection(self, gray, swappable_faces, all_detected_kps=()):
+    def start_from_detection(self, gray, swappable_faces, all_detected_kps=(),
+                             scene_cut=False):
         """Call on a full-detection frame. swappable_faces: list of
         (kps, character_number) pairs for faces that will actually be
         swapped this frame. all_detected_kps: kps for *every* face this
@@ -126,14 +139,23 @@ class FaceTracker:
         """
         fresh = [TrackedFace(kps.copy(), number, track_id)
                  for kps, number, track_id in swappable_faces]
-        fresh_numbers = {face.character_number for face in fresh}
+        fresh_track_ids = {face.track_id for face in fresh}
 
-        still_missing = [
-            face for face in self._tracked
-            if face.character_number not in fresh_numbers
-            and not self._claimed_by_detection(face.kps, all_detected_kps)
-        ]
-        carried = self._track_step(self._prev_gray, gray, still_missing)
+        # Never propagate landmarks across a cut. Previously, scene-cut
+        # detection reset identity state but start_from_detection could still
+        # LK-carry an old swappable face into the new shot when no new
+        # detection claimed its former screen position -- a direct route to
+        # spectacular one-frame face scrambles.
+        if scene_cut:
+            self.stats["scene_cut_tracks_cleared"] += len(self._tracked)
+            carried = []
+        else:
+            still_missing = [
+                face for face in self._tracked
+                if face.track_id not in fresh_track_ids
+                and not self._claimed_by_detection(face.kps, all_detected_kps)
+            ]
+            carried = self._track_step(self._prev_gray, gray, still_missing)
 
         self._tracked = fresh + carried
         self._prev_gray = gray
@@ -169,14 +191,63 @@ class FaceTracker:
         h, w = gray.shape[:2]
         survivors = []
         for face in faces:
+            self.stats["flow_attempts"] += 1
             pts = face.kps.astype(np.float32).reshape(-1, 1, 2)
             new_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None, **LK_PARAMS)
             if new_pts is None or status is None or not status.all():
+                self.stats["flow_rejected_status"] += 1
                 continue  # lost one or more points -- drop until next full detection
             new_kps = new_pts.reshape(-1, 2)
+
+            if TRACK_FLOW_QUALITY_GATE:
+                # LK's status only says a local optimum was found. Track the
+                # result back to the previous frame: corrupt points in blur,
+                # darkness and occlusion commonly report success but fail
+                # this round trip.
+                back_pts, back_status, _ = cv2.calcOpticalFlowPyrLK(
+                    gray, prev_gray, new_pts, None, **LK_PARAMS
+                )
+                if back_pts is None or back_status is None or not back_status.all():
+                    self.stats["flow_rejected_status"] += 1
+                    continue
+                fb = np.linalg.norm(back_pts.reshape(-1, 2) - face.kps, axis=1)
+                if float(np.median(fb)) > TRACK_MAX_FB_ERROR_PX or float(fb.max()) > TRACK_MAX_FB_ERROR_PX * 2.0:
+                    self.stats["flow_rejected_fb"] += 1
+                    continue
+
+                # Five points used independently can collapse or shear into a
+                # shape that INSwapper interprets as a grotesque face. Require
+                # one plausible partial-affine motion to explain them.
+                A, inliers = cv2.estimateAffinePartial2D(
+                    face.kps.astype(np.float32), new_kps.astype(np.float32),
+                    method=cv2.RANSAC, ransacReprojThreshold=2.0,
+                )
+                if A is None or inliers is None or int(inliers.sum()) < 4:
+                    self.stats["flow_rejected_geometry"] += 1
+                    continue
+                predicted = face.kps @ A[:, :2].T + A[:, 2]
+                residual = float(np.linalg.norm(predicted - new_kps, axis=1).mean())
+                scale = float(np.hypot(A[0, 0], A[1, 0]))
+                rotation = abs(float(np.degrees(np.arctan2(A[1, 0], A[0, 0]))))
+                if (residual > TRACK_MAX_AFFINE_RESIDUAL_PX
+                        or not TRACK_MIN_FRAME_SCALE <= scale <= TRACK_MAX_FRAME_SCALE
+                        or rotation > TRACK_MAX_FRAME_ROTATION_DEG):
+                    self.stats["flow_rejected_geometry"] += 1
+                    continue
+
             if (new_kps[:, 0] < 0).any() or (new_kps[:, 0] >= w).any() \
                     or (new_kps[:, 1] < 0).any() or (new_kps[:, 1] >= h).any():
                 continue  # a tracked point left the frame
             face.kps = new_kps
             survivors.append(face)
         return survivors
+
+    def summary(self):
+        s = self.stats
+        rejected = s["flow_rejected_status"] + s["flow_rejected_fb"] + s["flow_rejected_geometry"]
+        return (
+            f"tracking quality: {rejected}/{s['flow_attempts']} propagated faces withheld "
+            f"(status={s['flow_rejected_status']}, fb={s['flow_rejected_fb']}, "
+            f"geometry={s['flow_rejected_geometry']}), "
+            f"{s['scene_cut_tracks_cleared']} stale tracks cleared at cuts"
+        )

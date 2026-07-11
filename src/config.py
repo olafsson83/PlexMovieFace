@@ -155,6 +155,17 @@ CTX_ID = int(os.environ.get("CTX_ID", "0"))
 # landmarks) via optical flow on the frames in between instead of
 # re-detecting, to avoid the dominant per-frame detection cost.
 DETECT_EVERY_N_FRAMES = int(os.environ.get("DETECT_EVERY_N_FRAMES", "5"))
+# Optical-flow frames have no fresh detector/pose confidence. Reject a
+# propagated swap when the five landmarks do not round-trip through
+# forward/backward LK or no longer behave like one rigid face. This is a
+# render-safety gate: a short original-face gap is preferable to a scrambled
+# affine warp in darkness, occlusion, or a fast head turn.
+TRACK_FLOW_QUALITY_GATE = os.environ.get("TRACK_FLOW_QUALITY_GATE", "true").lower() == "true"
+TRACK_MAX_FB_ERROR_PX = float(os.environ.get("TRACK_MAX_FB_ERROR_PX", "1.75"))
+TRACK_MAX_AFFINE_RESIDUAL_PX = float(os.environ.get("TRACK_MAX_AFFINE_RESIDUAL_PX", "2.5"))
+TRACK_MIN_FRAME_SCALE = float(os.environ.get("TRACK_MIN_FRAME_SCALE", "0.78"))
+TRACK_MAX_FRAME_SCALE = float(os.environ.get("TRACK_MAX_FRAME_SCALE", "1.28"))
+TRACK_MAX_FRAME_ROTATION_DEG = float(os.environ.get("TRACK_MAX_FRAME_ROTATION_DEG", "18"))
 # Mean grayscale pixel difference between consecutive frames above this
 # forces a full re-detection regardless of DETECT_EVERY_N_FRAMES, since a
 # scene cut invalidates whatever was being tracked.

@@ -34,6 +34,7 @@ from config import (
     MATCH_THRESHOLD, MAINTAIN_THRESHOLD, SEGMENT_FRAME_COUNT, USE_NVENC,
 )
 import face_engine
+import analysis_store
 import identity
 import plate_matching
 import preflight
@@ -115,7 +116,9 @@ def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts, 
 
     if use_tracking:
         all_kps = [face.kps for face in detected]
-        return tracker.start_from_detection(gray, swappable, all_kps)
+        return tracker.start_from_detection(
+            gray, swappable, all_kps, scene_cut=scene_cut
+        )
     return [tracking.TrackedFace(kps, number, track_id)
             for kps, number, track_id in swappable]
 
@@ -269,7 +272,11 @@ def main():
     if args.render_only:
         if not plan_path.exists():
             sys.exit(f"--render-only but no analysis artifact at {plan_path}.")
-    elif args.reanalyze or not plan_path.exists():
+    elif (args.reanalyze or not plan_path.exists()
+          or not analysis_store.is_compatible(plan_path)):
+        if plan_path.exists() and not analysis_store.is_compatible(plan_path):
+            print("Existing analysis artifact predates the tracked-frame safety "
+                  "checks; regenerating it.")
         analyze_movie.run_analysis(face_app, sources, use_tracking=use_tracking)
     else:
         print(f"Reusing analysis artifact {plan_path} (pass --reanalyze after changing "

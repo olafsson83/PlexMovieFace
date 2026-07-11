@@ -11,7 +11,20 @@ import json
 
 import numpy as np
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+
+
+def is_compatible(path):
+    """Cheap header check used before deciding to reuse an analysis plan.
+    Analysis algorithms are part of the artifact contract: version 2 adds
+    scene-cut-safe and quality-gated optical-flow decisions, so a v1 plan
+    must be regenerated rather than silently rendering its old bad rows."""
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            header = json.loads(str(data["header"]))
+        return header.get("format_version") == FORMAT_VERSION
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return False
 
 
 def save_plan(path, header, rows):

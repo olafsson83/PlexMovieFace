@@ -120,6 +120,30 @@ person swaps weighted as hard failures):
 
 ---
 
+## Round-3 external review (tracking safety, integrated 2026-07-11)
+
+Three real tracking defects found by a second external review, integrated
+after code review + our own tests (the zip shipped none) + suite gating:
+1. LK "success" was trusted blindly; optical-flow propagation now requires
+   forward/backward round-trip consistency AND one plausible partial-affine
+   motion explaining all five landmarks (scale/rotation/residual limits) --
+   scrambled-face flashes in dark/occluded/fast footage came from exactly
+   these corrupt propagations. Feature-flagged (TRACK_FLOW_QUALITY_GATE).
+2. Tracked landmarks could survive a scene cut when no new detection
+   claimed their old position; start_from_detection now clears
+   unconditionally on cuts.
+3. Carry-forward suppression was keyed by character_number, so two
+   simultaneous tracks of the same character suppressed each other; now
+   keyed by track_id.
+Artifact format bumped to v2 with an is_compatible() check -- old plans
+regenerate automatically instead of silently rendering stale decisions.
+Suite after (safety trade, all expectations still met, 0 wrong-person):
+hp 967 -> 953, diehard 510 -> 432 (72/340 propagations withheld:
+19 status, 30 fb, 23 geometry; 3 stale tracks cleared at cuts),
+brokeback 703 -> 651.
+
+---
+
 ## v1 history (completed phases)
 
 Goal: make swapped faces (a) never land on the wrong person, and (b) match the
