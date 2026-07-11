@@ -49,6 +49,12 @@ MATCH_THRESHOLD = float(os.environ.get("MATCH_THRESHOLD", "0.7"))
 # reasonable "is this still probably the same person" bar, just too lenient
 # to be the bar for deciding that in the first place.
 MAINTAIN_THRESHOLD = float(os.environ.get("MAINTAIN_THRESHOLD", "0.6"))
+# An operator who explicitly sets thresholds in .env outranks auto-
+# calibration: calibration derives from discovery-frame statistics, which
+# can misrepresent a movie's extremes (measured: a dark-footage project
+# with deliberately lowered thresholds lost half its coverage when
+# calibration activated over them).
+THRESHOLDS_EXPLICIT = ("MATCH_THRESHOLD" in os.environ) or ("MAINTAIN_THRESHOLD" in os.environ)
 
 # Track-based identity decisions (see identity.py). MATCH_THRESHOLD acts as
 # the "enter" bar and MAINTAIN_THRESHOLD as the "keep" bar unless discovery

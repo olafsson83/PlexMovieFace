@@ -82,27 +82,68 @@ def cluster_faces(records):
     return clusters, embeddings, labels
 
 
-def calibration_stats(label, centroid, embeddings, labels, label_to_number):
+PROTOTYPES_PER_CHARACTER = 5
+
+
+def select_prototypes(embeddings, k=PROTOTYPES_PER_CHARACTER):
+    """Prototype bank = the centroid PLUS diverse members chosen by
+    farthest-point sampling. The centroid must stay in the bank: it is the
+    best single representative for typical faces, and a bank of scattered
+    member embeddings alone scores typical faces LOWER than the old
+    centroid did (measured on the regression suite: coverage collapsed on
+    two fixtures before the centroid was anchored). The FPS members add
+    what the mean compresses away -- a profile face matches a profile
+    prototype instead of being dragged down by a frontal-dominated mean.
+    Pose/brightness aren't measured yet (milestone 6); embedding-space
+    diversity is the v1 proxy.
+    """
+    embs = np.stack(embeddings)
+    centroid = embs.mean(axis=0)
+    centroid = centroid / (np.linalg.norm(centroid) or 1)
+    chosen = [int(np.argmax(embs @ centroid))]
+    while len(chosen) < min(k - 1, len(embs)):
+        sims_to_chosen = embs @ embs[chosen].T          # N x len(chosen)
+        nearest = sims_to_chosen.max(axis=1)
+        nearest[chosen] = np.inf                        # don't re-pick
+        candidate = int(np.argmin(nearest))
+        if candidate in chosen:
+            break
+        chosen.append(candidate)
+    return np.vstack([centroid[None], embs[chosen]])
+
+
+def prototype_scores(embeddings, prototypes):
+    """Max-over-prototypes cosine score for each embedding -- the same
+    scoring the swap stage uses, so calibration stats stay consistent."""
+    return (embeddings @ np.asarray(prototypes).T).max(axis=1)
+
+
+def calibration_stats(label, prototypes, embeddings, labels, label_to_number):
     """Empirical score distributions for the swap stage's threshold
     calibration (see identity.py). These carry selection bias -- membership
     was itself decided by a similarity cut -- so identity.py treats them as
     evidence with safety margins, not ground truth.
 
-    genuine_p10/p50: percentiles of members' similarity to their own centroid.
+    All scores are max-over-prototypes, the same function the swap stage
+    applies, so the genuine and impostor distributions shift together when
+    the representation changes.
+
+    genuine_p10/p50: percentiles of members' scores against their own bank.
     impostor_p99_by_cluster: for every OTHER cluster (plus DBSCAN noise faces
-    under the key "noise"), the 99th percentile of its faces' similarity to
-    THIS centroid -- kept per-cluster so the swap stage can exclude duplicate
+    under the key "noise"), the 99th percentile of its faces' scores against
+    THIS bank -- kept per-cluster so the swap stage can exclude duplicate
     clusters of the same actor (same source photo) when computing the real
     impostor tail.
     """
-    member_sims = embeddings[labels == label] @ centroid
+    member_sims = prototype_scores(embeddings[labels == label], prototypes)
     impostor_p99 = {}
     for other in set(labels.tolist()):
         if other == label:
             continue
-        sims = embeddings[labels == other] @ centroid
-        if len(sims) == 0:
+        others = embeddings[labels == other]
+        if len(others) == 0:
             continue
+        sims = prototype_scores(others, prototypes)
         key = "noise" if other == -1 else label_to_number[other]
         impostor_p99[key] = round(float(np.percentile(sims, 99)), 4)
     return {
@@ -178,15 +219,18 @@ def export_characters(clusters, embeddings, labels):
             cv2.imwrite(str(out_path), crop)
             timestamps.append(sample["timestamp"])
 
+        prototypes = select_prototypes([m["embedding"] for m in members])
         manifest[str(character_number)] = {
             "centroid": centroid.tolist(),
+            "prototypes": prototypes.tolist(),
             "member_count": len(members),
             "sample_timestamps": timestamps,
             "calibration": calibration_stats(
-                label, centroid, embeddings, labels, label_to_number
+                label, prototypes, embeddings, labels, label_to_number
             ),
         }
-        print(f"  character{character_number}: {len(members)} samples across the movie")
+        print(f"  character{character_number}: {len(members)} samples, "
+              f"{len(prototypes)} prototypes")
 
     CLUSTERS_JSON.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest

@@ -17,7 +17,9 @@ from tqdm import tqdm
 
 from config import DISCOVERY_FRAMES_DIR, CLUSTERS_JSON, CLUSTER_EPS
 import face_engine
-from discover_characters import MIN_DET_SCORE, MIN_FACE_SIZE, calibration_stats
+from discover_characters import (
+    MIN_DET_SCORE, MIN_FACE_SIZE, calibration_stats, select_prototypes,
+)
 
 
 def main():
@@ -63,12 +65,17 @@ def main():
         if not (labels == i).any():
             print(f"  character{n}: no faces re-assigned, skipping calibration")
             continue
+        # Assignment stayed nearest-centroid (numbering stability); the
+        # prototype bank and its calibration come from the assigned members.
+        prototypes = select_prototypes(embeddings[labels == i])
+        manifest[n]["prototypes"] = prototypes.tolist()
         manifest[n]["calibration"] = calibration_stats(
-            i, centroids[i], embeddings, labels, label_to_number
+            i, prototypes, embeddings, labels, label_to_number
         )
         cal = manifest[n]["calibration"]
         worst_impostor = max(cal["impostor_p99_by_cluster"].values(), default=0.0)
-        print(f"  character{n}: genuine_p10={cal['genuine_p10']:.3f} "
+        print(f"  character{n}: {len(prototypes)} prototypes, "
+              f"genuine_p10={cal['genuine_p10']:.3f} "
               f"genuine_p50={cal['genuine_p50']:.3f} worst_impostor_p99={worst_impostor:.3f}")
 
     CLUSTERS_JSON.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

@@ -64,8 +64,24 @@ person swaps weighted as hard failures):
    - Still open for later: shot_id in the state keys, backward OPTICAL
      tracking (only decision backfill is implemented -- no new detections
      are created backward), tracklet merging across occlusion.
-5. Pose-diverse prototype banks per character (replace single centroids);
-   two-tier discovery (strict seeds + track-supported expansion faces).
+5. DONE (v1) -- prototype banks per character: centroid anchor + diverse
+   members via farthest-point sampling in embedding space (pose/brightness
+   measurement arrives in milestone 6), scored max-over-bank everywhere
+   (identity, calibration stats, diagnostics). Two lessons the regression
+   harness caught before they shipped:
+   - A bank of scattered member embeddings WITHOUT the centroid scores
+     typical faces lower than the old mean did (coverage collapsed on two
+     fixtures); the centroid must stay in the bank as the floor.
+   - Auto-calibration must not outrank an explicitly set .env threshold:
+     calibration derives from discovery-frame statistics and misjudged the
+     dark-footage project whose operator had deliberately lowered
+     thresholds (coverage halved until precedence was fixed:
+     explicit env > calibration > env defaults).
+   Suite after: diehard 599 -> 613, hp 985 (held), brokeback 703 (-3,
+   within noise); 0 wrong-person swaps. Known artifact: clusters smaller
+   than the bank size self-score genuine_p10 = 1.0 (harmless -- thresholds
+   anchor on impostor tails). Still open: two-tier discovery (strict seeds
+   + track-supported expansion faces).
 6. Pose/landmark confidence + explicit "unrenderable frame" decisions.
 7. Swap backend interface; benchmark higher-res backends against the
    fixture suite (inswapper_128 stays as the fast baseline).

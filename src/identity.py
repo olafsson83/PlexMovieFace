@@ -32,10 +32,21 @@ import face_engine
 from config import (
     MATCH_THRESHOLD, MAINTAIN_THRESHOLD, MIN_MARGIN, STRONG_ENTER_MARGIN,
     CONFIRM_FRAMES, REJECT_FRAMES, TRACK_MISS_LIMIT, IDENTITY_AUTO_CALIBRATION,
+    THRESHOLDS_EXPLICIT,
 )
 
 # Below this, cosine scores are noise regardless of what calibration says.
 ABSOLUTE_SCORE_FLOOR = 0.30
+
+
+def prototype_max_score(embedding, prototypes):
+    """Identity score against a prototype bank: best match over the bank
+    (a profile face matches the profile prototype instead of being dragged
+    down by a frontal-dominated mean). Accepts a single centroid vector for
+    projects that haven't been recalibrated yet."""
+    protos = np.atleast_2d(np.asarray(prototypes, dtype=np.float32))
+    emb = np.asarray(embedding, dtype=np.float32)
+    return float((protos @ emb).max())
 
 
 # --- Source-photo grouping ---------------------------------------------------
@@ -78,8 +89,10 @@ def resolve_thresholds(groups, manifest):
 
     thresholds = {}
     for gid, members in group_members.items():
-        calibrated = IDENTITY_AUTO_CALIBRATION and all(
-            "calibration" in manifest.get(n, {}) for n in members
+        calibrated = (
+            IDENTITY_AUTO_CALIBRATION
+            and not THRESHOLDS_EXPLICIT  # operator's explicit .env wins
+            and all("calibration" in manifest.get(n, {}) for n in members)
         )
         if calibrated:
             impostor = 0.0
@@ -255,7 +268,7 @@ class TrackIdentityManager:
 
     def _score(self, face):
         scores = {
-            n: face_engine.cosine_similarity(face.normed_embedding, c)
+            n: prototype_max_score(face.normed_embedding, c)
             for n, c in self.centroids.items()
         }
         group_scores = {}

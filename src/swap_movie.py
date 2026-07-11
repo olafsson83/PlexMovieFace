@@ -44,8 +44,15 @@ SEGMENTS_DIR = OUTPUT_DIR / "_segments"
 
 
 def load_clusters():
+    """number -> prototype bank (K x 512). Falls back to the single centroid
+    (as a 1 x 512 bank) for projects that predate prototype banks."""
     manifest = json.loads(CLUSTERS_JSON.read_text(encoding="utf-8"))
-    return {number: np.array(data["centroid"], dtype=np.float32) for number, data in manifest.items()}
+    return {
+        number: np.atleast_2d(np.array(
+            data.get("prototypes", [data["centroid"]]), dtype=np.float32
+        ))
+        for number, data in manifest.items()
+    }
 
 
 def load_source_faces(face_app):
@@ -83,7 +90,7 @@ def classify(face, centroids, hint_number=None):
     """
     best_number, best_score = None, None
     for number, centroid in centroids.items():
-        score = face_engine.cosine_similarity(face.normed_embedding, centroid)
+        score = identity.prototype_max_score(face.normed_embedding, centroid)
         threshold = MAINTAIN_THRESHOLD if number == hint_number else MATCH_THRESHOLD
         if score < threshold:
             continue
