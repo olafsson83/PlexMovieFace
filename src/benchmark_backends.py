@@ -50,7 +50,7 @@ def main():
     centroids = load_clusters()
     backend = swap_backend.build_backend()
     matcher = plate_matching.PlateMatcher(backend)
-    interior = _interior_mask(backend.capabilities().get("crop_size", 128))
+    interior = _interior_mask(128)  # sharpness is always measured at 128 (common footing)
 
     cap = cv2.VideoCapture(args.clip)
     if not cap.isOpened():
@@ -80,7 +80,11 @@ def main():
                 swap_ms = (time.perf_counter() - t0) * 1000
 
                 bgr_fake, _ = backend.swap(frame, tf, backend.prepare_source(source))
-                crop_sharp = sharpness_metrics(bgr_fake, interior)[0]
+                # Measure sharpness at a COMMON resolution: Laplacian variance
+                # is resolution-dependent (upsampling spreads gradients), so a
+                # 512px crop must be compared to a 128px crop on equal footing.
+                ref = cv2.resize(bgr_fake, (128, 128), interpolation=cv2.INTER_AREA)
+                crop_sharp = sharpness_metrics(ref, interior)[0]
 
                 # Identity survival: embed the composited face.
                 out_faces = face_app.get(out_frame)

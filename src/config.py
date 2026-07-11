@@ -143,6 +143,12 @@ MAX_ABS_YAW = float(os.environ.get("MAX_ABS_YAW", "65"))
 # flicker the swap on and off.
 POSE_EXIT_MARGIN = float(os.environ.get("POSE_EXIT_MARGIN", "8"))
 
+# v2 milestone 7: SWAP_BACKEND selects the synthesis backend (see
+# swap_backend.py). inswapper_gfpgan chains GFPGAN restoration at 512px
+# after inswapper; this blend weights the enhanced result over the plain
+# upscale (1.0 = full GFPGAN, which can over-beautify).
+GFPGAN_BLEND = float(os.environ.get("GFPGAN_BLEND", "0.8"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial

@@ -95,7 +95,17 @@ person swaps weighted as hard failures):
    and MAX_ABS_YAW are .env-tunable if samples argue for a looser limit.
    Still open: landmark confidence, occlusion estimates, per-backend
    support ranges (milestone 7).
-7. DONE (interface + baseline) -- swap backend interface (swap_backend.py):
+7. DONE -- first candidate accepted as OPT-IN: inswapper_gfpgan chains
+   GFPGAN v1.4 (ONNX, CUDA, no torch) at 512px after inswapper. Benchmark
+   verdict on the brokeback fixture (fair sharpness metric: crops compared
+   at a common 128px -- Laplacian variance is resolution-dependent):
+   blend 0.8 = +53% detail (148 -> 226.5) at -0.049 identity similarity
+   and +59% latency; blend 0.5 = +12% detail at -0.018 identity. Visual
+   side-by-side confirms clearly sharper eyes/brows/skin. Stays opt-in
+   (SWAP_BACKEND=inswapper_gfpgan) because of the measured identity cost;
+   the alignment (and thus the pose gate range) is unchanged -- it does
+   NOT fix profiles. Original milestone notes:
+   swap backend interface (swap_backend.py):
    prepare_source / swap / capabilities, factory keyed by SWAP_BACKEND.
    PlateMatcher consumes the interface (raw INSwapper still accepted and
    auto-wrapped). benchmark_backends.py measures a backend on real footage:
