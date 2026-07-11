@@ -48,11 +48,26 @@ were identity failures (the elderly-extra bug), not optics.
      grain -- which the sharpness metric deliberately ignores (it denoises
      before measuring). Phase 3 (grain) is where the visible gain should be.
 
-3. **Grain / compression-texture matching**
-   - Luma/chroma space, robust MAD estimator, annular sampling around the
-     face with edge/saturation rejection; correlated (not white) noise;
-     deterministic per-(track, frame) seeds; applied after all blurs,
-     before encode.
+3. **Grain / compression-texture matching** (done)
+   - Applied in FRAME space on the warped generated layer (crop space would
+     rescale the noise spectrum by the warp), between warp and composite.
+   - Plate noise measured from a ring just outside the face; the generated
+     layer's own noise measured from the face interior in the same space;
+     only the variance deficit is added (the swap inherits some plate noise
+     through conditioning -- adding the full amount would double-grain).
+   - Luma/chroma (YCrCb), robust MAD on high-pass residuals with
+     edge/saturation rejection; spatially correlated noise rescaled so the
+     same estimator reads the target on the synthetic field (keeps all
+     amplitudes in consistent estimator units, no analytic filter constants);
+     deterministic per-swap seeds; per-character EMA with position reset.
+   - **Measured**: on the VCD Harry Potter clip, 773/967 swaps grained (mean
+     luma sigma 2.13) -- engaging exactly where sharpness matching found
+     nothing, confirming grain was the dominant texture gap. Post-encode the
+     face/surroundings noise ratio moves from 1.01 to 1.11; the still-frame
+     difference is subtle (x264 compresses it), the win is expected in
+     motion where static-smooth skin against living grain is the tell.
+   - Gotcha for posterity: cv2.cvtColor on float32 assumes [0,1] range with
+     0.5 chroma offset -- YCrCb round-trips must go through uint8.
 
 4. **Motion blur** (last — wrong blur is more destructive than missing blur)
    - Landmark-based partial-affine motion (RANSAC), not one centroid vector;

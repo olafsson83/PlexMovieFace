@@ -35,6 +35,8 @@ from insightface.utils import face_align
 from config import (
     SHARPNESS_MATCHING, SHARPNESS_TOLERANCE, SHARPNESS_MAX_SIGMA,
     SHARPNESS_TEMPORAL_SMOOTHING,
+    GRAIN_MATCHING, GRAIN_MAX_SIGMA, GRAIN_MIN_SIGMA,
+    GRAIN_TEMPORAL_SMOOTHING, GRAIN_EDGE_REJECT_PERCENTILE,
 )
 
 SIGMA_CANDIDATES = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
@@ -74,6 +76,19 @@ def paste_back(frame, bgr_fake, M):
     dead code -- the merge only ever uses the eroded/feathered white mask.)
     With no modification, output is identical to the original paste-back.
     """
+    layer = warp_generated(frame, bgr_fake, M)
+    if layer is None:
+        return frame
+    return composite(frame, *layer)
+
+
+def warp_generated(frame, bgr_fake, M):
+    """Inverse-warps the generated crop into frame space and builds the
+    compositing mask (insightface's exact math). Returns (warped_fake,
+    soft_mask, face_region, mask_size) or None when the warp lands entirely
+    off-frame. face_region is the pre-erosion binary face area -- the grain
+    stage samples the plate ring just outside it.
+    """
     IM = cv2.invertAffineTransform(M)
     h, w = frame.shape[:2]
     crop_h, crop_w = bgr_fake.shape[:2]
@@ -85,7 +100,8 @@ def paste_back(frame, bgr_fake, M):
 
     inds = np.where(mask == 255)
     if len(inds[0]) == 0:
-        return frame
+        return None
+    face_region = mask == 255
     mask_h = inds[0].max() - inds[0].min()
     mask_w = inds[1].max() - inds[1].min()
     mask_size = int(np.sqrt(mask_h * mask_w))
@@ -94,8 +110,13 @@ def paste_back(frame, bgr_fake, M):
     mask = cv2.erode(mask, np.ones((k, k), np.uint8), iterations=1)
     k = max(mask_size // 20, 5)
     mask = cv2.GaussianBlur(mask, (2 * k + 1, 2 * k + 1), 0)
-    mask = (mask / 255.0)[:, :, None]
+    mask = mask / 255.0
 
+    return warped_fake, mask, face_region, mask_size
+
+
+def composite(frame, warped_fake, soft_mask, face_region=None, mask_size=None):
+    mask = soft_mask[:, :, None]
     merged = mask * warped_fake + (1 - mask) * frame.astype(np.float32)
     return merged.astype(np.uint8)
 
@@ -158,25 +179,179 @@ class SharpnessMatcher:
         )
 
 
+def robust_noise_sigmas(bgr, sample_mask, edge_reject_pct=GRAIN_EDGE_REJECT_PERCENTILE):
+    """Per-channel (Y, Cr, Cb) noise scale from high-pass residuals over the
+    sampled pixels, using MAD (1.4826 * median absolute deviation) so hair,
+    background texture, and hard edges don't inflate the estimate the way a
+    plain standard deviation would. Saturated/crushed and strong-gradient
+    pixels are rejected first -- their residuals are structure, not noise.
+
+    Note: the residual filter removes part of the noise itself, so these are
+    consistent *estimator units*, systematically below the true sigma. All
+    grain math (plate measurement, generated-face measurement, deficit, and
+    synthesis rescaling) stays inside the same units, so the bias cancels.
+
+    Returns np.array([sigma_y, sigma_cr, sigma_cb]) or None when too few
+    valid pixels remain for a stable estimate.
+    """
+    ycc = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+    y = ycc[:, :, 0]
+    valid = sample_mask & (y > 10) & (y < 245)
+    if int(valid.sum()) < 300:
+        return None
+    gx = cv2.Sobel(y, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(y, cv2.CV_32F, 0, 1)
+    grad = gx * gx + gy * gy
+    valid = valid & (grad <= np.percentile(grad[valid], edge_reject_pct))
+    if int(valid.sum()) < 300:
+        return None
+
+    sigmas = []
+    for c in range(3):
+        ch = ycc[:, :, c]
+        residual = ch - cv2.GaussianBlur(ch, (0, 0), 1.0)
+        r = residual[valid]
+        med = float(np.median(r))
+        sigmas.append(1.4826 * float(np.median(np.abs(r - med))))
+    return np.array(sigmas, dtype=np.float32)
+
+
+class GrainMatcher:
+    """Adds the plate's missing noise texture to the generated layer in
+    frame space (crop space would rescale the noise spectrum by the warp).
+
+    Only the *deficit* is added: measured plate noise minus what the
+    generated face already carries, combined variance-wise -- the swap model
+    inherits some of the plate's noise through its conditioning, and adding
+    the full plate amount on top would double-grain. Noise is luma-dominant
+    per actual measurement (Y/Cr/Cb estimated separately), spatially
+    correlated (white noise through a small blur, not per-pixel RGB static),
+    and deterministically seeded per swap so it evolves frame to frame but
+    reproduces run to run.
+    """
+
+    def __init__(self, max_sigma=GRAIN_MAX_SIGMA, min_sigma=GRAIN_MIN_SIGMA,
+                 smoothing=GRAIN_TEMPORAL_SMOOTHING):
+        self.max_sigma = max_sigma
+        self.min_sigma = min_sigma
+        self.smoothing = smoothing
+        self._state = {}       # character_number -> (ema_sigmas, center)
+        self.applied_y = []    # per-swap applied luma sigma, for the summary
+
+    def reset(self):
+        self._state.clear()
+
+    def match(self, frame, warped_fake, face_region, mask_size, key, center, seed):
+        """Returns warped_fake with matched grain added (or unchanged)."""
+        rows = np.any(face_region, axis=1)
+        cols = np.any(face_region, axis=0)
+        r0, r1 = np.where(rows)[0][[0, -1]]
+        c0, c1 = np.where(cols)[0][[0, -1]]
+        pad = max(mask_size // 3, 12)
+        r0, r1 = max(0, r0 - pad), min(frame.shape[0], r1 + pad + 1)
+        c0, c1 = max(0, c0 - pad), min(frame.shape[1], c1 + pad + 1)
+
+        face_roi = face_region[r0:r1, c0:c1]
+        plate_roi = frame[r0:r1, c0:c1]
+        fake_roi = warped_fake[r0:r1, c0:c1]
+
+        # Plate noise: a ring just outside the face; generated-face noise:
+        # the face interior of the warped layer, same estimator/space.
+        k_in = max(mask_size // 12, 3)
+        k_out = k_in + max(mask_size // 5, 8)
+        face_u8 = face_roi.astype(np.uint8)
+        ring = (cv2.dilate(face_u8, np.ones((k_out, k_out), np.uint8)) > 0) & ~(
+            cv2.dilate(face_u8, np.ones((k_in, k_in), np.uint8)) > 0
+        )
+        interior = cv2.erode(face_u8, np.ones((max(mask_size // 8, 5),) * 2, np.uint8)) > 0
+
+        plate_sigmas = robust_noise_sigmas(plate_roi, ring)
+        fake_sigmas = robust_noise_sigmas(fake_roi, interior)
+        raw = None
+        if plate_sigmas is not None and fake_sigmas is not None:
+            deficit = np.sqrt(np.maximum(plate_sigmas ** 2 - fake_sigmas ** 2, 0.0))
+            raw = np.minimum(deficit, self.max_sigma)
+
+        prev = self._state.get(key)
+        if raw is None:
+            if prev is None or np.linalg.norm(center - prev[1]) >= SMOOTHING_RESET_DISTANCE:
+                self.applied_y.append(0.0)
+                return warped_fake
+            target = prev[0]  # no fresh estimate; reuse the smoothed model
+        elif prev is not None and np.linalg.norm(center - prev[1]) < SMOOTHING_RESET_DISTANCE:
+            target = (1 - self.smoothing) * raw + self.smoothing * prev[0]
+        else:
+            target = raw
+        self._state[key] = (target, center)
+
+        self.applied_y.append(float(target[0]))
+        if target[0] < self.min_sigma:
+            return warped_fake
+
+        warped_fake = warped_fake.copy()
+        warped_fake[r0:r1, c0:c1] = self._grained(fake_roi, target, seed)
+        return warped_fake
+
+    def _grained(self, fake_roi, target_sigmas, seed):
+        rng = np.random.default_rng(seed)
+        noise = rng.standard_normal((*fake_roi.shape[:2], 3), dtype=np.float32)
+        noise = cv2.GaussianBlur(noise, (0, 0), 0.5)  # spatial correlation
+
+        # Rescale each channel so OUR OWN estimator reads the target on the
+        # synthetic field -- keeps synthesis in the same units as measurement
+        # without deriving the residual filter's attenuation analytically.
+        everywhere = np.ones(fake_roi.shape[:2], dtype=bool)
+        for c in range(3):
+            ch = noise[:, :, c]
+            residual = ch - cv2.GaussianBlur(ch, (0, 0), 1.0)
+            med = float(np.median(residual[everywhere]))
+            est = 1.4826 * float(np.median(np.abs(residual[everywhere] - med)))
+            noise[:, :, c] *= target_sigmas[c] / max(est, 1e-6)
+
+        ycc = cv2.cvtColor(fake_roi, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        ycc += noise
+        # Convert back via uint8: cv2's float color conversions assume [0,1]
+        # range with a 0.5 chroma offset, which would wreck 0..255 data.
+        ycc_u8 = np.clip(np.rint(ycc), 0, 255).astype(np.uint8)
+        return cv2.cvtColor(ycc_u8, cv2.COLOR_YCrCb2BGR)
+
+    def summary(self):
+        if not self.applied_y:
+            return "grain matching: no faces processed"
+        arr = np.array(self.applied_y)
+        engaged = arr[arr >= self.min_sigma]
+        if not len(engaged):
+            return f"grain matching: 0/{len(arr)} swaps needed grain"
+        return (
+            f"grain matching: {len(engaged)}/{len(arr)} swaps grained "
+            f"(mean luma sigma {engaged.mean():.2f}, max {arr.max():.2f})"
+        )
+
+
 class PlateMatcher:
-    """Orchestrates swap inference + plate matching + compositing. This is
-    the insertion point for later phases (grain, motion blur) -- they slot
-    into swap() between inference and paste_back in pipeline order."""
+    """Orchestrates swap inference + plate matching + compositing, in
+    pipeline order: (later: motion blur) -> residual sharpness in crop
+    space -> warp to frame space -> grain -> composite. Grain is terminal
+    before the merge because it's a sensor/encode phenomenon layered on top
+    of all optics."""
 
     def __init__(self, swapper):
         self.swapper = swapper
         self.sharpness = SharpnessMatcher() if SHARPNESS_MATCHING else None
+        self.grain = GrainMatcher() if GRAIN_MATCHING else None
+        self._swap_counter = 0
 
     def swap(self, frame, tracked_face, source_face):
         bgr_fake, M = self.swapper.get(frame, tracked_face, source_face, paste_back=False)
+        self._swap_counter += 1
+        center = np.asarray(tracked_face.kps).mean(axis=0)
 
         if self.sharpness is not None:
             # The plate must be measured from the UNswapped frame; frame is
-            # untouched until paste_back below, so this crop is clean.
+            # untouched until composite below, so this crop is clean.
             plate_crop, _ = face_align.norm_crop2(
                 frame, tracked_face.kps, bgr_fake.shape[0]
             )
-            center = np.asarray(tracked_face.kps).mean(axis=0)
             sigma = self.sharpness.choose_sigma(
                 plate_crop, bgr_fake, tracked_face.character_number, center
             )
@@ -184,7 +359,23 @@ class PlateMatcher:
             if sigma > 0.05:
                 bgr_fake = cv2.GaussianBlur(bgr_fake, (0, 0), sigma)
 
-        return paste_back(frame, bgr_fake, M)
+        layer = warp_generated(frame, bgr_fake, M)
+        if layer is None:
+            return frame
+        warped_fake, soft_mask, face_region, mask_size = layer
+
+        if self.grain is not None:
+            warped_fake = self.grain.match(
+                frame, warped_fake, face_region, mask_size,
+                tracked_face.character_number, center, self._swap_counter,
+            )
+
+        return composite(frame, warped_fake, soft_mask)
 
     def summary(self):
-        return self.sharpness.summary() if self.sharpness else "plate matching disabled"
+        parts = []
+        if self.sharpness is not None:
+            parts.append(self.sharpness.summary())
+        if self.grain is not None:
+            parts.append(self.grain.summary())
+        return "\n".join(parts) if parts else "plate matching disabled"

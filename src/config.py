@@ -82,6 +82,18 @@ SHARPNESS_MAX_SIGMA = float(os.environ.get("SHARPNESS_MAX_SIGMA", "3.0"))
 # EMA weight on the previous smoothed sigma (0 = no smoothing).
 SHARPNESS_TEMPORAL_SMOOTHING = float(os.environ.get("SHARPNESS_TEMPORAL_SMOOTHING", "0.7"))
 
+# Phase 4: add the plate's noise/grain texture to the generated face --
+# the swap output is missing the plate's high-frequency grain, which is the
+# main "pasted-on" tell on grainy or compressed footage.
+GRAIN_MATCHING = os.environ.get("GRAIN_MATCHING", "true").lower() == "true"
+GRAIN_MAX_SIGMA = float(os.environ.get("GRAIN_MAX_SIGMA", "12.0"))
+# Below this applied luma sigma the plate is clean enough to skip grain.
+GRAIN_MIN_SIGMA = float(os.environ.get("GRAIN_MIN_SIGMA", "0.5"))
+GRAIN_TEMPORAL_SMOOTHING = float(os.environ.get("GRAIN_TEMPORAL_SMOOTHING", "0.7"))
+# Ring pixels with gradient energy above this percentile are rejected when
+# estimating plate noise (their residuals are structure, not noise).
+GRAIN_EDGE_REJECT_PERCENTILE = float(os.environ.get("GRAIN_EDGE_REJECT_PERCENTILE", "75"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial
