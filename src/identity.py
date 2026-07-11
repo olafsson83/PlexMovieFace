@@ -489,3 +489,44 @@ def backfill_swap_rows(observation_log, thresholds, max_gap_frames):
                 kps = (1 - t) * a.kps + t * b.kps
                 rows.append((frame, track_id, number, kps.astype(np.float32)))
     return rows
+
+
+def bridge_swap_rows(observation_log, existing_pairs, max_gap_frames):
+    """Fills INTERIOR track gaps between two detector-verified swapped
+    observations -- where optical-flow propagation failed mid-shot (quality
+    gate, lost points), the in-between frames used to be lost even though
+    the same physical track was confidently swapped on both sides.
+    Interpolating landmarks between two verified detection anchors is far
+    safer than LK through the murk that killed the propagation.
+
+    Only CONSECUTIVE observations of a track are bridged, and only when
+    both were actually swapped as the same character: any contradicting
+    evidence inside the gap (a pose-blocked frame, an identity dropout, a
+    reclassification) appears as an intermediate observation and splits the
+    pair, blocking the bridge by construction. Cuts can't be bridged either
+    -- the identity manager mints a new track_id at every cut. Frames the
+    plan already covers (successful propagation, backfill) are skipped via
+    existing_pairs: a set of (frame_index, track_id).
+
+    Returns rows shaped like the analysis plan: (frame, track_id, number, kps).
+    """
+    by_track = {}
+    for obs in observation_log:
+        by_track.setdefault(obs.track_id, []).append(obs)
+
+    rows = []
+    for track_id, obs_list in by_track.items():
+        obs_list.sort(key=lambda o: o.frame_index)
+        for a, b in zip(obs_list[:-1], obs_list[1:]):
+            if (a.swapped_number is None or a.swapped_number != b.swapped_number):
+                continue
+            span = b.frame_index - a.frame_index
+            if span <= 1 or span > max_gap_frames:
+                continue
+            for frame in range(a.frame_index + 1, b.frame_index):
+                if (frame, track_id) in existing_pairs:
+                    continue
+                t = (frame - a.frame_index) / span
+                kps = (1 - t) * a.kps + t * b.kps
+                rows.append((frame, track_id, a.swapped_number, kps.astype(np.float32)))
+    return rows

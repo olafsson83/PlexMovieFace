@@ -66,13 +66,20 @@ def run_analysis(face_app, sources, use_tracking=True):
         progress.close()
         cap.release()
 
-    # Future-evidence pass: give confirmed tracks back the pre-confirmation
-    # frames the acceptance gate withheld (see identity.backfill_swap_rows).
+    # Future-evidence passes: give confirmed tracks back the pre-confirmation
+    # frames the acceptance gate withheld, then bridge interior gaps between
+    # detector-verified anchors where propagation failed mid-shot.
     backfill = identity.backfill_swap_rows(
         identity_mgr.observation_log, thresholds,
         max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
     )
     rows.extend(backfill)
+    existing_pairs = {(r[0], r[1]) for r in rows}
+    bridged = identity.bridge_swap_rows(
+        identity_mgr.observation_log, existing_pairs,
+        max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
+    )
+    rows.extend(bridged)
     rows.sort(key=lambda r: r[0])
 
     header = {
@@ -87,6 +94,7 @@ def run_analysis(face_app, sources, use_tracking=True):
         "adaptive_detection": detector.stats,
         "tracking_quality": tracker.stats,
         "backfilled_rows": len(backfill),
+        "bridged_rows": len(bridged),
         "analysis_seconds": round(time.time() - start, 1),
     }
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,6 +103,7 @@ def run_analysis(face_app, sources, use_tracking=True):
     print(tracker.summary())
     print(f"pose gate: {counts.get('unrenderable_events', 0)} unrenderable detections withheld")
     print(f"retroactive backfill: {len(backfill)} pre-confirmation frames recovered")
+    print(f"anchor bridging: {len(bridged)} mid-shot gap frames recovered")
     print(f"Analysis complete: {len(rows)} swap decisions across {frame_i} frames -> {path}")
     return path
 

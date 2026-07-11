@@ -120,6 +120,26 @@ person swaps weighted as hard failures):
 
 ---
 
+## Hit-rate plan (2026-07-11)
+
+Loss ledger and fixes, in order of return on effort:
+1. DONE -- anchor-bridged gap interpolation (identity.bridge_swap_rows):
+   interior track gaps between two detector-verified swapped observations
+   are filled by landmark interpolation -- far safer than the corrupt LK
+   propagation the quality gate withholds. Contradicting evidence inside a
+   gap (pose block, identity dropout) splits the anchor pair and blocks
+   the bridge by construction; cuts can't bridge (new track_id per cut).
+   Suite: diehard 432 -> 485, brokeback 651 -> 713 (best ever, reclaiming
+   the gate's false positives), hp 953 -> 955; 0 wrong-person.
+2. NEXT -- true-recall measurement: annotate one fixture with "a human can
+   see the face here" ground truth so hit rate gets a meaningful
+   denominator and the remaining loss buckets get sized.
+3. ROI re-detection around predicted track positions (deferred milestone-3
+   half): crop + upscale retries where full-frame enhanced detection still
+   misses.
+4. Adaptive detection cadence (denser detection in marginal shots).
+5. Pose-capable synthesis backend (the profile ceiling; torch stack).
+
 ## Round-3 external review (tracking safety, integrated 2026-07-11)
 
 Three real tracking defects found by a second external review, integrated

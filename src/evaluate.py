@@ -61,6 +61,7 @@ def run_fixture_analysis(fixture, out_dir):
         raise SystemExit(f"cannot open clip: {fixture['clip']}")
 
     rows = []  # (frame, number, cx, cy)
+    covered_pairs = set()  # (frame, track_id), for the bridging pass
     frame_i = 0
     while True:
         ret, frame = cap.read()
@@ -71,17 +72,26 @@ def run_fixture_analysis(fixture, out_dir):
         for face in active:
             center = np.asarray(face.kps).mean(axis=0)
             rows.append((frame_i, face.character_number, float(center[0]), float(center[1])))
+            covered_pairs.add((frame_i, face.track_id))
         frame_i += 1
     cap.release()
 
-    # Match the analysis pass exactly: the plan the render would consume
-    # includes retroactively backfilled pre-confirmation frames.
+    # Match the analysis pass exactly: backfilled pre-confirmation frames
+    # plus anchor-bridged mid-shot gaps.
     from config import DETECT_EVERY_N_FRAMES
     backfill = identity.backfill_swap_rows(
         identity_mgr.observation_log, thresholds,
         max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
     )
-    for frame, _track_id, number, kps in backfill:
+    for frame, track_id, number, kps in backfill:
+        center = np.asarray(kps).mean(axis=0)
+        rows.append((frame, number, float(center[0]), float(center[1])))
+        covered_pairs.add((frame, track_id))
+    bridged = identity.bridge_swap_rows(
+        identity_mgr.observation_log, covered_pairs,
+        max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
+    )
+    for frame, _track_id, number, kps in bridged:
         center = np.asarray(kps).mean(axis=0)
         rows.append((frame, number, float(center[0]), float(center[1])))
     rows.sort(key=lambda r: r[0])
