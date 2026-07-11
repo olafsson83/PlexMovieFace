@@ -31,8 +31,19 @@ person swaps weighted as hard failures):
    Verified: two-pass on the brokeback fixture produces exactly the
    single-pass baseline's 706 swap decisions; regression suite PASS,
    0 wrong-person swaps.
-3. Adaptive low-light detection (analysis-only enhancement variants +
-   ROI retries at higher det_size; original plate never altered).
+3. DONE -- adaptive low-light detection (adaptive_detection.py). Staged
+   retry: base detection on the original frame; when the frame is dark AND
+   (nothing found, or a live track's region came back empty), retry on an
+   analysis-only enhanced copy (adaptive gamma toward mid-gray + CLAHE on
+   luma) at a 960px detector canvas, merged by IoU with base detections
+   winning. The plate is never altered; embeddings/landmarks for retry
+   detections read the enhanced image (analysis only). Per-ROI upscale
+   retries deferred. Measured on the diehard fixture: 1441 retries,
+   119 extra detections, frames swapped 479 -> 547 (+14%) with the no-swap
+   windows still clean; full suite PASS, 0 wrong-person swaps; HP and
+   brokeback unchanged (bright footage, retry never fires). Honest ceiling:
+   the deepest silhouette frames (early vent crawl) recover nothing --
+   there is no face signal to enhance.
 4. Persistent anonymous tracks with one authoritative track_id shared by
    identity, motion and plate-matching state (fixes the state-keying bug);
    Hungarian association on position+embedding+scale; forward-backward.

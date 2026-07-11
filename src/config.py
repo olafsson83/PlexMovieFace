@@ -114,6 +114,17 @@ MOTION_MIN_INLIER_RATIO = float(os.environ.get("MOTION_MIN_INLIER_RATIO", "0.7")
 # a face-wide linear PSF can't represent rotational smear.
 MOTION_ROTATION_LIMIT_DEG = float(os.environ.get("MOTION_ROTATION_LIMIT_DEG", "3.0"))
 
+# v2 milestone 3: staged low-light detection retry on an analysis-only
+# enhanced copy of dark frames (gamma lift + CLAHE, larger detector canvas).
+# The plate that gets swapped/composited is never altered.
+ADAPTIVE_DETECTION = os.environ.get("ADAPTIVE_DETECTION", "true").lower() == "true"
+# Mean frame luma below this counts as dark (0-255).
+ADAPTIVE_DARK_LUMA = float(os.environ.get("ADAPTIVE_DARK_LUMA", "60"))
+# Detector canvas for the retry pass (base pass stays at 640).
+ADAPTIVE_RETRY_DET_SIZE = int(os.environ.get("ADAPTIVE_RETRY_DET_SIZE", "960"))
+# Cap on the adaptive gamma lift (1.0 = no lift).
+ADAPTIVE_GAMMA_MAX = float(os.environ.get("ADAPTIVE_GAMMA_MAX", "2.2"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial

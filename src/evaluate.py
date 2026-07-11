@@ -37,6 +37,7 @@ def run_fixture_analysis(fixture, out_dir):
     import cv2
     import numpy as np
 
+    import adaptive_detection
     import face_engine
     import identity
     import tracking
@@ -50,6 +51,7 @@ def run_fixture_analysis(fixture, out_dir):
     groups = identity.group_sources(SOURCE_FACES_DIR)
     thresholds = identity.resolve_thresholds(groups, manifest)
     identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+    detector = adaptive_detection.AdaptiveDetector(face_app).bind(identity_mgr)
     tracker = tracking.FaceTracker()
     counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
 
@@ -63,7 +65,7 @@ def run_fixture_analysis(fixture, out_dir):
         ret, frame = cap.read()
         if not ret:
             break
-        active = process_frame(frame, face_app, identity_mgr, tracker, True, counts)
+        active = process_frame(frame, detector, identity_mgr, tracker, True, counts)
         for face in active:
             center = np.asarray(face.kps).mean(axis=0)
             rows.append((frame_i, face.character_number, float(center[0]), float(center[1])))
@@ -76,7 +78,9 @@ def run_fixture_analysis(fixture, out_dir):
         writer.writerow(["frame", "number", "cx", "cy"])
         writer.writerows(rows)
 
-    return evaluate_expectations(fixture, rows, frame_i)
+    summary = evaluate_expectations(fixture, rows, frame_i)
+    summary["adaptive_detection"] = detector.stats
+    return summary
 
 
 def evaluate_expectations(fixture, rows, total_frames):

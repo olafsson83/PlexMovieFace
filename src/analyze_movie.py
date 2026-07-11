@@ -16,6 +16,7 @@ import cv2
 from tqdm import tqdm
 
 from config import MOVIE_PATH, CLUSTERS_JSON, SOURCE_FACES_DIR, OUTPUT_DIR, DETECT_EVERY_N_FRAMES
+import adaptive_detection
 import analysis_store
 import face_engine
 import identity
@@ -35,6 +36,7 @@ def run_analysis(face_app, sources, use_tracking=True):
     thresholds = identity.resolve_thresholds(groups, manifest)
     identity.describe_thresholds(groups, thresholds)
     identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+    detector = adaptive_detection.AdaptiveDetector(face_app).bind(identity_mgr)
     tracker = tracking.FaceTracker()
     counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
 
@@ -52,7 +54,7 @@ def run_analysis(face_app, sources, use_tracking=True):
             ret, frame = cap.read()
             if not ret:
                 break
-            active = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
+            active = process_frame(frame, detector, identity_mgr, tracker, use_tracking, counts)
             for face in active:
                 rows.append((frame_i, face.track_id if face.track_id is not None else -1,
                              face.character_number, face.kps))
@@ -71,10 +73,12 @@ def run_analysis(face_app, sources, use_tracking=True):
             for gid, t in thresholds.items()
         },
         "counts": counts,
+        "adaptive_detection": detector.stats,
         "analysis_seconds": round(time.time() - start, 1),
     }
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = analysis_store.save_plan(artifact_path(), header, rows)
+    print(detector.summary())
     print(f"Analysis complete: {len(rows)} swap decisions across {frame_i} frames -> {path}")
     return path
 

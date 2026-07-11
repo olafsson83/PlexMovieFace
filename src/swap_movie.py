@@ -240,6 +240,8 @@ def main():
         groups = identity.group_sources(SOURCE_FACES_DIR)
         thresholds = identity.resolve_thresholds(groups, manifest)
         identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+        import adaptive_detection
+        face_app = adaptive_detection.AdaptiveDetector(face_app).bind(identity_mgr)
         plate_matcher = plate_matching.PlateMatcher(face_engine.build_swapper())
         cap = cv2.VideoCapture(str(MOVIE_PATH))
         if not cap.isOpened():
