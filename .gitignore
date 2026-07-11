@@ -21,3 +21,6 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# regression-suite outputs (regenerable)
+tests/fixtures/results/
