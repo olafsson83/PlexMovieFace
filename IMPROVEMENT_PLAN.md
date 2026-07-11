@@ -44,9 +44,26 @@ person swaps weighted as hard failures):
    brokeback unchanged (bright footage, retry never fires). Honest ceiling:
    the deepest silhouette frames (early vent crawl) recover nothing --
    there is no face signal to enhance.
-4. Persistent anonymous tracks with one authoritative track_id shared by
-   identity, motion and plate-matching state (fixes the state-keying bug);
-   Hungarian association on position+embedding+scale; forward-backward.
+4. PARTIAL -- persistent tracks, v1 landed:
+   - Hungarian assignment over a combined position + embedding + scale cost
+     (embedding term keeps crossing actors on their own tracks -- unit-tested
+     with the crossing scenario greedy association gets wrong). Uncontested
+     one-face-one-track pairs skip the embedding term: embeddings resolve
+     competition, and a lone dark face's junk embedding must not break the
+     continuity position alone supports (measured -4% dark-fixture coverage
+     without the carve-out).
+   - Retroactive backfill (first real future-evidence use the two-pass
+     architecture enables): the analysis pass records every track
+     observation; tracks that eventually confirm extend their swap range
+     backward over pre-confirmation observations that already cleared the
+     KEEP bar, contiguously, with landmark interpolation across detection
+     gaps. Never-accepted tracks (the elderly-extra shape) contribute
+     nothing by construction.
+   - Suite after: hp 967 -> 985, diehard 547 -> 599, brokeback unchanged;
+     0 wrong-person swaps throughout.
+   - Still open for later: shot_id in the state keys, backward OPTICAL
+     tracking (only decision backfill is implemented -- no new detections
+     are created backward), tracklet merging across occlusion.
 5. Pose-diverse prototype banks per character (replace single centroids);
    two-tier discovery (strict seeds + track-supported expansion faces).
 6. Pose/landmark confidence + explicit "unrenderable frame" decisions.

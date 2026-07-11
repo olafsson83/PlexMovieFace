@@ -133,6 +133,20 @@ class _Track:
     pending_count: int = 0
     missing: int = 0
     scores: list = field(default_factory=list)  # recent accepted-group scores
+    embedding: np.ndarray | None = None  # last observation's embedding
+
+
+@dataclass
+class Observation:
+    """One detection-frame sighting of a track, recorded during analysis so
+    a later pass can revise decisions with evidence from the track's whole
+    life (e.g. retroactive backfill of pre-confirmation frames)."""
+    frame_index: int
+    track_id: int
+    kps: np.ndarray
+    group_scores: dict           # group id -> best member score this frame
+    swapped_number: str | None   # number swapped this frame, else None
+    accepted_group: str | None   # track's accepted group AFTER this frame
 
 
 def _center(kps):
@@ -166,30 +180,76 @@ class TrackIdentityManager:
         self.unmapped = [n for n in centroids if n not in groups]
         self._tracks: list[_Track] = []
         self._next_track_id = 0
+        self.record_observations = False
+        self.observation_log: list[Observation] = []
 
     def reset(self):
         self._tracks = []
 
     # -- association --
 
+    # Combined-cost weights: position dominates, embedding breaks ties when
+    # two people are close (the crossing-actors case greedy distance gets
+    # wrong), scale guards against a near face grabbing a far track.
+    W_POSITION = 1.0
+    W_EMBEDDING = 1.5
+    W_SCALE = 0.5
+    MAX_ASSIGN_COST = 2.0
+
+    def _pair_cost(self, face, track):
+        dist = float(np.linalg.norm(_center(face.kps) - _center(track.kps)))
+        radius = _radius(track.kps)
+        if dist >= radius:
+            return None  # gate: outside plausible motion since last sighting
+        cost = self.W_POSITION * (dist / radius)
+        if track.embedding is not None:
+            sim = float(np.dot(face.normed_embedding, track.embedding))
+            cost += self.W_EMBEDDING * max(0.0, 1.0 - sim)
+        scale_ratio = _radius(face.kps) / max(radius, 1e-6)
+        cost += self.W_SCALE * abs(float(np.log(max(scale_ratio, 1e-6))))
+        return cost
+
     def _associate(self, faces):
-        """Greedy nearest-center matching of detections to existing tracks."""
-        pairs = []
+        """Globally optimal detection-to-track assignment (Hungarian) over a
+        combined position/embedding/scale cost, gated per pair. Greedy
+        nearest-center mis-assigns when two people pass close to each other;
+        the embedding term keeps identities on their own tracks.
+
+        Uncontested pairs (one face, one gated track, mutually exclusive
+        alternatives) skip the embedding/scale terms: embeddings exist to
+        resolve COMPETITION, and in dark scenes a lone face's junk embedding
+        must not break the continuity position alone supports (measured:
+        dark-fixture coverage dropped 4% without this carve-out).
+        """
+        if not faces or not self._tracks:
+            return {}
+        cost = np.full((len(faces), len(self._tracks)), np.inf)
+        position_ok = np.zeros((len(faces), len(self._tracks)), dtype=bool)
         for fi, face in enumerate(faces):
-            fc = _center(face.kps)
             for ti, track in enumerate(self._tracks):
-                dist = float(np.linalg.norm(fc - _center(track.kps)))
-                if dist < _radius(track.kps):
-                    pairs.append((dist, fi, ti))
-        pairs.sort(key=lambda p: p[0])
-        face_to_track = {}
-        used_tracks = set()
-        for _, fi, ti in pairs:
-            if fi in face_to_track or ti in used_tracks:
-                continue
-            face_to_track[fi] = ti
-            used_tracks.add(ti)
-        return face_to_track
+                c = self._pair_cost(face, track)
+                if c is not None:
+                    cost[fi, ti] = c
+                    position_ok[fi, ti] = True
+        if not position_ok.any():
+            return {}
+
+        # Uncontested carve-out: face fi's only gated track is ti, and track
+        # ti gates no other face -> assign on position evidence alone.
+        for fi in range(len(faces)):
+            gated = np.where(position_ok[fi])[0]
+            if len(gated) == 1 and position_ok[:, gated[0]].sum() == 1:
+                cost[fi, gated[0]] = min(cost[fi, gated[0]], self.MAX_ASSIGN_COST)
+
+        from scipy.optimize import linear_sum_assignment
+        finite_max = cost[np.isfinite(cost)].max()
+        solver_cost = np.where(np.isfinite(cost), cost, finite_max + self.MAX_ASSIGN_COST + 1)
+        rows, cols = linear_sum_assignment(solver_cost)
+        return {
+            int(fi): int(ti)
+            for fi, ti in zip(rows, cols)
+            if np.isfinite(cost[fi, ti]) and cost[fi, ti] <= self.MAX_ASSIGN_COST
+        }
 
     # -- scoring --
 
@@ -216,7 +276,7 @@ class TrackIdentityManager:
 
     # -- the decision --
 
-    def observe(self, faces, scene_cut=False, counts=None):
+    def observe(self, faces, scene_cut=False, counts=None, frame_index=None):
         if scene_cut:
             self._tracks = []
 
@@ -235,6 +295,7 @@ class TrackIdentityManager:
                 track = self._tracks[ti]
                 track.kps = np.asarray(face.kps).copy()
                 track.missing = 0
+            track.embedding = np.asarray(face.normed_embedding, dtype=np.float32)
             touched.add(id(track))
 
             scores, group_scores, group_best_number, unmapped_best = self._score(face)
@@ -301,6 +362,16 @@ class TrackIdentityManager:
                 else:
                     counts["no_photo_events"] += 1
 
+            if self.record_observations and frame_index is not None:
+                self.observation_log.append(Observation(
+                    frame_index=frame_index,
+                    track_id=track.track_id,
+                    kps=np.asarray(face.kps, dtype=np.float32).copy(),
+                    group_scores=dict(group_scores),
+                    swapped_number=track.identity_number if swapped else None,
+                    accepted_group=track.identity,
+                ))
+
         # Age out tracks no detection claimed this pass.
         for track in self._tracks:
             if id(track) not in touched:
@@ -316,3 +387,62 @@ class TrackIdentityManager:
         track.pending_count = 0
         track.keep_fails = 0
         track.scores = [score]
+
+
+# --- retroactive backfill (future evidence) -----------------------------------
+
+def backfill_swap_rows(observation_log, thresholds, max_gap_frames):
+    """Extends each eventually-accepted track's swap range backward over its
+    pre-confirmation observations -- the confirmation gate costs genuine
+    tracks their first few detection frames, and only a pass that has seen
+    the track's whole life can safely give them back.
+
+    A pre-acceptance observation is backfilled only when its own score
+    against the eventually-accepted group already cleared that group's KEEP
+    bar (the same evidence standard an accepted track needs to stay
+    swapped), walking backward contiguously from the acceptance point and
+    stopping at the first failure or a gap longer than max_gap_frames. A
+    track that never got accepted (the elderly-extra shape) contributes
+    nothing. Frames between detection observations get linearly
+    interpolated landmarks -- the same 5-frame-scale gap optical flow
+    bridges on the forward path.
+
+    Returns rows shaped like the analysis plan: (frame, track_id, number, kps).
+    """
+    by_track = {}
+    for obs in observation_log:
+        by_track.setdefault(obs.track_id, []).append(obs)
+
+    rows = []
+    for track_id, obs_list in by_track.items():
+        obs_list.sort(key=lambda o: o.frame_index)
+        accept_i = next(
+            (i for i, o in enumerate(obs_list) if o.swapped_number is not None),
+            None,
+        )
+        if accept_i is None or accept_i == 0:
+            continue
+        gid = obs_list[accept_i].accepted_group
+        number = obs_list[accept_i].swapped_number
+        keep = thresholds[gid].keep
+
+        anchors = [obs_list[accept_i]]
+        for obs in reversed(obs_list[:accept_i]):
+            score = obs.group_scores.get(gid, -1.0)
+            if score < keep:
+                break
+            if anchors[0].frame_index - obs.frame_index > max_gap_frames:
+                break
+            anchors.insert(0, obs)
+        if len(anchors) < 2:
+            continue
+
+        for a, b in zip(anchors[:-1], anchors[1:]):
+            span = b.frame_index - a.frame_index
+            for frame in range(a.frame_index, b.frame_index):
+                if b.swapped_number is not None and frame == b.frame_index:
+                    continue  # acceptance frame is already in the plan
+                t = (frame - a.frame_index) / span if span else 0.0
+                kps = (1 - t) * a.kps + t * b.kps
+                rows.append((frame, track_id, number, kps.astype(np.float32)))
+    return rows

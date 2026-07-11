@@ -92,7 +92,7 @@ def classify(face, centroids, hint_number=None):
     return best_number
 
 
-def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts):
+def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts, frame_index=None):
     """Runs detection + track-level identity decisions on detection frames,
     optical-flow tracking in between. Returns the TrackedFace list to swap."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if use_tracking else None
@@ -103,7 +103,8 @@ def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts):
 
     scene_cut = tracker.is_scene_cut(gray) if use_tracking else False
     detected = face_app.get(frame)
-    swappable = identity_mgr.observe(detected, scene_cut=scene_cut, counts=counts)
+    swappable = identity_mgr.observe(detected, scene_cut=scene_cut, counts=counts,
+                                     frame_index=frame_index)
 
     if use_tracking:
         all_kps = [face.kps for face in detected]

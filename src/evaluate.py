@@ -51,6 +51,7 @@ def run_fixture_analysis(fixture, out_dir):
     groups = identity.group_sources(SOURCE_FACES_DIR)
     thresholds = identity.resolve_thresholds(groups, manifest)
     identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+    identity_mgr.record_observations = True
     detector = adaptive_detection.AdaptiveDetector(face_app).bind(identity_mgr)
     tracker = tracking.FaceTracker()
     counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
@@ -65,12 +66,25 @@ def run_fixture_analysis(fixture, out_dir):
         ret, frame = cap.read()
         if not ret:
             break
-        active = process_frame(frame, detector, identity_mgr, tracker, True, counts)
+        active = process_frame(frame, detector, identity_mgr, tracker, True, counts,
+                               frame_index=frame_i)
         for face in active:
             center = np.asarray(face.kps).mean(axis=0)
             rows.append((frame_i, face.character_number, float(center[0]), float(center[1])))
         frame_i += 1
     cap.release()
+
+    # Match the analysis pass exactly: the plan the render would consume
+    # includes retroactively backfilled pre-confirmation frames.
+    from config import DETECT_EVERY_N_FRAMES
+    backfill = identity.backfill_swap_rows(
+        identity_mgr.observation_log, thresholds,
+        max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
+    )
+    for frame, _track_id, number, kps in backfill:
+        center = np.asarray(kps).mean(axis=0)
+        rows.append((frame, number, float(center[0]), float(center[1])))
+    rows.sort(key=lambda r: r[0])
 
     csv_path = out_dir / f"{fixture['name']}.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -80,6 +94,7 @@ def run_fixture_analysis(fixture, out_dir):
 
     summary = evaluate_expectations(fixture, rows, frame_i)
     summary["adaptive_detection"] = detector.stats
+    summary["backfilled_rows"] = len(backfill)
     return summary
 
 

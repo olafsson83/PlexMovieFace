@@ -36,6 +36,7 @@ def run_analysis(face_app, sources, use_tracking=True):
     thresholds = identity.resolve_thresholds(groups, manifest)
     identity.describe_thresholds(groups, thresholds)
     identity_mgr = identity.TrackIdentityManager(centroids, sources, groups, thresholds)
+    identity_mgr.record_observations = True
     detector = adaptive_detection.AdaptiveDetector(face_app).bind(identity_mgr)
     tracker = tracking.FaceTracker()
     counts = {"swapped": 0, "no_photo_events": 0, "unmatched_events": 0}
@@ -54,7 +55,8 @@ def run_analysis(face_app, sources, use_tracking=True):
             ret, frame = cap.read()
             if not ret:
                 break
-            active = process_frame(frame, detector, identity_mgr, tracker, use_tracking, counts)
+            active = process_frame(frame, detector, identity_mgr, tracker, use_tracking,
+                                   counts, frame_index=frame_i)
             for face in active:
                 rows.append((frame_i, face.track_id if face.track_id is not None else -1,
                              face.character_number, face.kps))
@@ -63,6 +65,15 @@ def run_analysis(face_app, sources, use_tracking=True):
     finally:
         progress.close()
         cap.release()
+
+    # Future-evidence pass: give confirmed tracks back the pre-confirmation
+    # frames the acceptance gate withheld (see identity.backfill_swap_rows).
+    backfill = identity.backfill_swap_rows(
+        identity_mgr.observation_log, thresholds,
+        max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
+    )
+    rows.extend(backfill)
+    rows.sort(key=lambda r: r[0])
 
     header = {
         "movie_path": str(MOVIE_PATH),
@@ -74,11 +85,13 @@ def run_analysis(face_app, sources, use_tracking=True):
         },
         "counts": counts,
         "adaptive_detection": detector.stats,
+        "backfilled_rows": len(backfill),
         "analysis_seconds": round(time.time() - start, 1),
     }
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = analysis_store.save_plan(artifact_path(), header, rows)
     print(detector.summary())
+    print(f"retroactive backfill: {len(backfill)} pre-confirmation frames recovered")
     print(f"Analysis complete: {len(rows)} swap decisions across {frame_i} frames -> {path}")
     return path
 
