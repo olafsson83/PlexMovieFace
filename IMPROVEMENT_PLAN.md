@@ -1,5 +1,29 @@
 # Plate-matching & identity roadmap
 
+## Full-movie finding: alignment inlier gate over-rejected profiles (2026-07-12)
+
+First full feature-length run (Die Hard with a Vengeance, 1080p, John2 as
+McClane across 6 clusters, hybrid backend) surfaced a real defect the
+fixture clips had hidden: the SimSwap alignment validator withheld
+3320/3336 extreme-pose swaps, EVERY ONE for the `inliers` reason. Diagnosis
+on 240 detector-fresh faces per pose bucket:
+- A genuine profile (65-80 deg yaw) structurally yields exactly 3 RANSAC
+  inliers -- the occluded-side eye and mouth corner never fit a FRONTAL
+  arcface template. The old MIN_INLIERS=4 rejected 100% of profiles.
+- Inlier count does NOT separate genuine profiles from scrambles (both ~3);
+  residual (genuine profile max 0.126 vs scramble >0.18) and scale
+  (collapsed sets blow up to 18x) do. So the inlier=4 rule added no
+  discriminative power residual/scale didn't already have, at the cost of
+  rejecting every profile.
+Fix: MIN_INLIERS lowered to 3 (floor -- 2 points define a similarity
+exactly). Measured on the real movie's extreme windows: 0 -> 287 profiles
+rendered, mean identity gain 0.37 over the untouched plate (p10 0.28, so no
+scramble leakage -- a scramble would gain ~0). Render-harness compare on
+the fixtures PASS (t22 0.01->0.048, others held); 106 unit tests, a real
+72-deg profile landmark set locked in as a regression fixture. The gate
+values are now env-overridable (ALIGN_MIN_INLIERS, ALIGN_MAX_RESIDUAL_FRACTION).
+NB: the existing full-movie render predates this fix -- re-render to apply.
+
 ## Round-4 external review (rendered-output quality, 2026-07-12)
 
 Directive accepted: do not optimise total swap count further until rendered

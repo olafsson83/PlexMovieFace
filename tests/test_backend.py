@@ -112,6 +112,7 @@ class BackendTests(unittest.TestCase):
 
         # Scrambled landmarks (the LK-corruption shape): eyes collapsed onto
         # the mouth line -- no similarity to the template explains them.
+        # Still rejected at MIN_INLIERS=3 (it fails on residual, not inliers).
         scrambled = np.array([[100, 200], [102, 200], [150, 90],
                               [100, 202], [104, 201]], dtype=np.float32)
         _, M2, inl2 = warp_by_template(np.zeros(frame_shape, np.uint8), scrambled,
@@ -119,6 +120,23 @@ class BackendTests(unittest.TestCase):
         report2 = validate_alignment(M2, inl2, scrambled, ARCFACE_112_V1, 512,
                                      frame_shape)
         self.assertFalse(report2["valid"])
+
+    def test_alignment_validation_accepts_genuine_profile(self):
+        # A real detector profile face (yaw -72.5 deg, from the Die Hard 3
+        # movie) yields exactly 3 RANSAC inliers -- the occluded-side eye and
+        # mouth corner never fit a frontal template. The old MIN_INLIERS=4
+        # rejected every such profile (measured: 3320/3336 SimSwap swaps
+        # withheld on the full movie); at 3 they render (identity gain 0.37).
+        from swap_backend import validate_alignment
+        frame_shape = (816, 1920, 3)
+        profile = np.array([[1139.77, 238.99], [1168.62, 248.13], [1101.69, 294.97],
+                            [1141.16, 350.0], [1163.33, 355.58]], dtype=np.float32)
+        _, M, inl = warp_by_template(np.zeros(frame_shape, np.uint8), profile,
+                                     ARCFACE_112_V1, 512)
+        report = validate_alignment(M, inl, profile, ARCFACE_112_V1, 512, frame_shape)
+        self.assertEqual(report["inlier_count"], 3)
+        self.assertLess(report["residual_fraction"], 0.18)
+        self.assertTrue(report["valid"])
 
     def test_alignment_validation_rejects_mostly_offframe_face(self):
         from swap_backend import validate_alignment

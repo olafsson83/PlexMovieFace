@@ -65,11 +65,23 @@ def warp_by_template(frame, kps, template, size):
     return crop, M, inliers
 
 
-# Alignment validity limits, grounded in measured genuine faces (harness
-# align_residual at 112px: frontal 0.03-0.06 of size, genuine extreme pose
-# up to 0.13; scrambled landmark sets fit no similarity and land far above).
-ALIGN_MAX_RESIDUAL_FRACTION = 0.18
-ALIGN_MIN_INLIERS = 4
+# Alignment validity limits, calibrated on the full Die Hard 3 movie
+# (1080p, 240 detector-fresh faces per pose bucket + synthetic scrambles):
+#   residual_fraction (mean landmark error / crop size):
+#     frontal p50 0.020 max 0.039; genuine profile (65-80 deg) p50 0.096
+#     max 0.126; scrambled sets land above 0.18 (collapsed sets instead
+#     blow up `scale`). Ceiling 0.18 sits cleanly above genuine profiles.
+#   inlier_count (5-point RANSAC): frontal ~5, but a GENUINE PROFILE
+#     structurally yields exactly 3 -- the occluded-side eye and mouth
+#     corner never fit a frontal template. MIN_INLIERS=4 therefore rejected
+#     100% of profiles (measured: the full movie withheld 3320/3336
+#     SimSwap swaps, all for `inliers`). At 3, those profiles render with
+#     mean identity gain 0.37 over the untouched plate (p10 0.28 -- no
+#     scramble leakage, which would gain ~0), while degenerate sets are
+#     still caught by residual/scale. Below 3 a fit is under-constrained
+#     (2 points define a similarity exactly), so 3 is the floor.
+ALIGN_MAX_RESIDUAL_FRACTION = float(os.environ.get("ALIGN_MAX_RESIDUAL_FRACTION", "0.18"))
+ALIGN_MIN_INLIERS = int(os.environ.get("ALIGN_MIN_INLIERS", "3"))
 ALIGN_MAX_SCALE = 8.0        # crop-per-frame-pixel upscale beyond this is mush
 ALIGN_MIN_FRAME_COVERAGE = 0.5  # fraction of the crop sampled from inside the frame
 
