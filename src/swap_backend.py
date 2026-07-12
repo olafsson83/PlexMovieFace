@@ -233,6 +233,7 @@ class HybridBackend:
     def swap(self, frame, target_face, prepared_source):
         route = "extreme" if yaw_proxy(target_face.kps) > self.threshold else "primary"
         self.routed[route] += 1
+        self.last_route = route  # read by evaluate_render.py per swap
         backend = self.extreme if route == "extreme" else self.primary
         return backend.swap(frame, target_face, prepared_source[route])
 

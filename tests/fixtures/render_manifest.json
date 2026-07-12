@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Rendered-output regression probes (run: python src/evaluate_render.py).",
+    "Unlike manifest.json (which validates the ANALYSIS plan), these probes",
+    "render pixels through the full backend + plate-matching path and measure",
+    "the output itself: identity actually transferred, alignment quality,",
+    "temporal stability, backend routing. A change is accepted only if these",
+    "improve -- more swap rows in the plan is not evidence by itself.",
+    "The diehard windows are the user's own screenshot pain frames",
+    "(t=22/23/25/27/36s -> frames 527/551/599/647/863) plus a frontal control."
+  ],
+  "probes": [
+    {
+      "name": "diehard_render",
+      "clip": "tests/fixtures/clips/diehard_airduct_clip.mp4",
+      "env": {
+        "CHARACTERS_DIR": "characters_diehard",
+        "SOURCE_FACES_DIR": "source_faces_diehard",
+        "OUTPUT_DIR": "output_diehard",
+        "MATCH_THRESHOLD": "0.45",
+        "MAINTAIN_THRESHOLD": "0.25",
+        "MAX_ABS_YAW": "85"
+      },
+      "windows": [
+        {"name": "t22_yaw81", "frames": [520, 535]},
+        {"name": "t23_yaw73", "frames": [544, 559]},
+        {"name": "t25_dark", "frames": [592, 607]},
+        {"name": "t27_junk_embedding", "frames": [640, 655]},
+        {"name": "t36_borderline", "frames": [856, 871]},
+        {"name": "frontal_control", "frames": [3262, 3285]}
+      ]
+    },
+    {
+      "name": "brokeback_render",
+      "clip": "tests/fixtures/clips/brokeback_camp_clip.mp4",
+      "env": {
+        "CHARACTERS_DIR": "characters_brokeback",
+        "SOURCE_FACES_DIR": "source_faces_brokeback",
+        "OUTPUT_DIR": "output_brokeback_twopass"
+      },
+      "windows": [
+        {"name": "twohander_control", "frames": [100, 125]}
+      ]
+    }
+  ]
+}
