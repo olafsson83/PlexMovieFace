@@ -142,5 +142,62 @@ class RetryDecisionTests(unittest.TestCase):
         self.assertEqual(det.stats["retries"], 0)
 
 
+class RecordingRecognition:
+    def __init__(self):
+        self.image_means = []
+
+    def get(self, img, face):
+        self.image_means.append(float(img.mean()))
+
+
+class RecognitionSourceTests(unittest.TestCase):
+    def test_enhanced_retry_embeds_on_the_original_plate(self):
+        # The retry DETECTS on the brightened copy, but identity thresholds
+        # were calibrated on plate pixels -- recognition must read the dark
+        # ORIGINAL, not the gamma/CLAHE-lifted image.
+        app = FakeFaceApp(base_faces=[], retry_hits=1)
+        rec = RecordingRecognition()
+        app.models = {"detection": app.det_model, "recognition": rec}
+        det = AdaptiveDetector(app, enabled=True)
+        frame = dark_frame(20)
+        faces = det._detect_enhanced(frame)
+        self.assertEqual(len(faces), 1)
+        self.assertAlmostEqual(rec.image_means[0], float(frame.mean()), delta=1.0)
+
+    def test_roi_retry_embeds_on_the_original_plate(self):
+        app = FakeFaceApp(base_faces=[], retry_hits=1)
+        rec = RecordingRecognition()
+        app.models = {"detection": app.det_model, "recognition": rec}
+        det = AdaptiveDetector(app, enabled=True)
+        frame = dark_frame(20)
+        # FakeDetModel's kps map back to ~(25, 25) at a ~10px landmark
+        # radius; the expected region matches, so the filter keeps it.
+        faces = det._detect_roi(frame, center=np.array([25.0, 25.0]), radius=15.0)
+        self.assertEqual(len(faces), 1)
+        self.assertAlmostEqual(rec.image_means[0], float(frame.mean()), delta=1.0)
+
+
+class RoiFilterTests(unittest.TestCase):
+    def test_detection_far_from_expected_center_is_filtered(self):
+        app = FakeFaceApp(base_faces=[], retry_hits=1)
+        det = AdaptiveDetector(app, enabled=True)
+        # Detection maps back to ~(57, 57); expected region is at (80, 80)
+        # with an 8px radius -- some other face, not the missing track.
+        faces = det._detect_roi(dark_frame(20), center=np.array([80.0, 80.0]),
+                                radius=8.0)
+        self.assertEqual(faces, [])
+        self.assertEqual(det.stats["roi_filtered"], 1)
+
+    def test_detection_at_implausible_scale_is_filtered(self):
+        app = FakeFaceApp(base_faces=[], retry_hits=1)
+        det = AdaptiveDetector(app, enabled=True)
+        # Center matches, but the track expects a face ~9x larger than the
+        # ~10px-radius detection.
+        faces = det._detect_roi(dark_frame(20), center=np.array([25.0, 25.0]),
+                                radius=90.0)
+        self.assertEqual(faces, [])
+        self.assertEqual(det.stats["roi_filtered"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

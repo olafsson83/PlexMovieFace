@@ -136,12 +136,14 @@ ADAPTIVE_GAMMA_MAX = float(os.environ.get("ADAPTIVE_GAMMA_MAX", "2.2"))
 ADAPTIVE_ROI_RETRY = os.environ.get("ADAPTIVE_ROI_RETRY", "true").lower() == "true"
 ADAPTIVE_ROI_UPSCALE = float(os.environ.get("ADAPTIVE_ROI_UPSCALE", "2.0"))
 
-# Hit-rate step 4: tracks with a well-established identity (several strong
-# observations) survive longer detection gaps before dying -- a proven
-# track bridging a dark stretch lets weak re-detections resume on the KEEP
-# bar instead of failing cold acquisition. On reacquisition after a gap the
-# track must prove itself (score >= keep) before swapping resumes; the
-# below-keep ride-out never applies to a freshly reacquired track.
+# Hit-rate step 4 (tightened in round 4): tracks with a well-established
+# identity survive longer detection gaps before dying. "Proven" counts
+# STRONG observations explicitly (enter-level score with the best-vs-
+# second margin) -- keep-level ride-through never qualifies. After a gap
+# longer than TRACK_MISS_LIMIT the reacquired track owes enter-level
+# evidence plus margin before swapping resumes (short gaps owe keep); the
+# below-keep ride-out never applies while proof is owed, and position-only
+# uncontested association never reacquires a missing track.
 PROVEN_TRACK_MISS_LIMIT = int(os.environ.get("PROVEN_TRACK_MISS_LIMIT", "6"))
 # A pending (unconfirmed) identity candidate survives this many detection
 # passes; confirming observations need not be strictly consecutive. Only

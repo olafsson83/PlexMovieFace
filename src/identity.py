@@ -148,17 +148,21 @@ class _Track:
     pending_count: int = 0
     pending_age: int = 0
     missing: int = 0
-    scores: list = field(default_factory=list)  # recent accepted-group scores
+    strong_hits: int = 0                 # observations at enter level WITH margin
     embedding: np.ndarray | None = None  # last observation's embedding
-    needs_proof: bool = False            # just reacquired after a gap: must
-                                         # clear KEEP before the ride-out applies
+    # Reacquisition proof owed before swapping resumes: None (none owed),
+    # "keep" (short gap: clearing KEEP suffices), or "enter" (long gap:
+    # someone else could have taken this spot -- demand enter-level
+    # evidence plus margin, the same bar a cold acquisition would face).
+    proof_level: str | None = None
 
     @property
     def proven(self):
-        """A track whose identity is backed by several strong observations
-        earns longer survival through detection gaps (dark stretches,
-        occlusion) -- see PROVEN_TRACK_MISS_LIMIT."""
-        return self.identity is not None and len(self.scores) >= 3
+        """A track whose identity is backed by several STRONG observations
+        (enter-level score with the best-vs-second margin, tracked
+        explicitly -- keep-level ride-through never counts) earns longer
+        survival through detection gaps; see PROVEN_TRACK_MISS_LIMIT."""
+        return self.identity is not None and self.strong_hits >= 3
 
     @property
     def miss_limit(self):
@@ -283,10 +287,16 @@ class TrackIdentityManager:
             return {}
 
         # Uncontested carve-out: face fi's only gated track is ti, and track
-        # ti gates no other face -> assign on position evidence alone.
+        # ti gates no other face -> assign on position evidence alone. Only
+        # for tracks seen LAST pass (missing == 0): position-only evidence
+        # is continuity evidence, and a track that has been gone for one or
+        # more passes has no continuity to assert -- someone else could be
+        # standing there now, and reacquisition must not happen on position
+        # alone (round-4 review).
         for fi in range(len(faces)):
             gated = np.where(position_ok[fi])[0]
-            if len(gated) == 1 and position_ok[:, gated[0]].sum() == 1:
+            if (len(gated) == 1 and position_ok[:, gated[0]].sum() == 1
+                    and self._tracks[gated[0]].missing == 0):
                 cost[fi, gated[0]] = min(cost[fi, gated[0]], self.MAX_ASSIGN_COST)
 
         from scipy.optimize import linear_sum_assignment
@@ -342,11 +352,17 @@ class TrackIdentityManager:
             else:
                 track = self._tracks[ti]
                 track.kps = np.asarray(face.kps).copy()
-                if track.missing > 0:
-                    # Reacquired after a gap: someone else could have taken
-                    # this spot, so swapping resumes only once the face
-                    # scores >= KEEP again (no below-keep ride-out).
-                    track.needs_proof = True
+                if track.missing > TRACK_MISS_LIMIT:
+                    # Reacquired after a LONG gap (survived only because
+                    # proven): demand the cold-acquisition evidence bar --
+                    # enter-level score plus margin -- before swapping
+                    # resumes. A keep-level 0.25 must not restart a swap on
+                    # a spot someone else had time to take.
+                    track.proof_level = "enter"
+                elif track.missing > 0:
+                    # Short gap: clearing KEEP again suffices, but the
+                    # below-keep ride-out is withheld until then.
+                    track.proof_level = track.proof_level or "keep"
                 track.missing = 0
             track.embedding = np.asarray(face.normed_embedding, dtype=np.float32)
             touched.add(id(track))
@@ -367,14 +383,19 @@ class TrackIdentityManager:
                 t = self.thresholds[gid]
                 s = group_scores.get(gid, -1.0)
                 competitor = self._competitor(group_scores, unmapped_best, gid)
-                if s >= t.keep:
+                margin = s - competitor
+                meets_proof = (
+                    track.proof_level != "enter"
+                    or (s >= t.enter and margin >= MIN_MARGIN)
+                )
+                if s >= t.keep and meets_proof:
                     track.keep_fails = 0
-                    track.needs_proof = False
+                    track.proof_level = None
                     track.identity_number = group_best_number[gid]
-                    track.scores.append(s)
-                    del track.scores[:-8]  # bounded history for `proven`
+                    if s >= t.enter and margin >= MIN_MARGIN:
+                        track.strong_hits += 1  # what `proven` counts
                     swapped = True
-                    swap_score, swap_margin = s, s - competitor
+                    swap_score, swap_margin = s, margin
                 elif competitor >= t.enter and competitor - s >= MIN_MARGIN:
                     # Clear evidence this face is someone else entirely --
                     # don't ride out the rejection streak, drop now.
@@ -382,14 +403,16 @@ class TrackIdentityManager:
                     track.identity_number = None
                     track.keep_fails = 0
                 else:
+                    # Below keep, or keep-level while enter-level proof is
+                    # still owed after a long gap -- either way, unproven.
                     track.keep_fails += 1
                     if track.keep_fails >= REJECT_FRAMES:
                         track.identity = None
                         track.identity_number = None
                         track.keep_fails = 0
-                    elif not track.needs_proof:
+                    elif track.proof_level is None:
                         swapped = True  # hysteresis: ride out a brief dip
-                        swap_score, swap_margin = s, s - competitor
+                        swap_score, swap_margin = s, margin
 
             if track.identity is None and not swapped:
                 best_gid = max(group_scores, key=group_scores.get, default=None)
@@ -483,8 +506,10 @@ class TrackIdentityManager:
         track.pending_count = 0
         track.pending_age = 0
         track.keep_fails = 0
-        track.needs_proof = False
-        track.scores = [score]
+        track.proof_level = None
+        # Acceptance itself required enter-level evidence with margin
+        # (strong instant or confirmed), so it counts as the first one.
+        track.strong_hits = 1
 
 
 def _lerp(a, b, t):

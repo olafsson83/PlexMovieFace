@@ -32,6 +32,12 @@ from config import (
 )
 
 
+# An ROI-recovered face must be scale-plausible for the track it is meant
+# to recover: its landmark-spread radius relative to the expected region's.
+ROI_MIN_SCALE_RATIO = 0.4
+ROI_MAX_SCALE_RATIO = 2.5
+
+
 def enhance_for_analysis(frame, gamma_max=ADAPTIVE_GAMMA_MAX):
     """Analysis-only luminance lift: adaptive gamma toward mid-gray, then
     CLAHE for local contrast. Chroma is untouched (YCrCb luma path)."""
@@ -84,7 +90,7 @@ class AdaptiveDetector:
         self.retry_det_size = int(retry_det_size)
         self.identity_mgr = None  # bound after construction (expected regions)
         self.stats = {"frames": 0, "dark_frames": 0, "retries": 0, "recovered_faces": 0,
-                      "roi_retries": 0, "roi_recovered": 0}
+                      "roi_retries": 0, "roi_recovered": 0, "roi_filtered": 0}
 
     def bind(self, identity_mgr):
         self.identity_mgr = identity_mgr
@@ -121,13 +127,16 @@ class AdaptiveDetector:
         faces = []
         for i in range(bboxes.shape[0]):
             face = Face(bbox=bboxes[i, 0:4], kps=kpss[i], det_score=bboxes[i, 4])
-            # Landmarks/embedding models also read the enhanced image --
-            # analysis only; the kps land in original-frame coordinates
-            # because the enhancement is a pure per-pixel transform.
+            # Landmark/pose models read the enhanced image (that's where
+            # the face is visible; kps stay in original-frame coordinates
+            # since enhancement is per-pixel). RECOGNITION reads the
+            # ORIGINAL plate: identity thresholds were calibrated on plate
+            # pixels, and gamma/CLAHE-shifted embeddings would feed
+            # identity decisions with uncalibrated scores (round 4).
             for taskname, model in self.face_app.models.items():
                 if taskname == "detection":
                     continue
-                model.get(enhanced, face)
+                model.get(frame if taskname == "recognition" else enhanced, face)
             faces.append(face)
         return faces
 
@@ -148,18 +157,39 @@ class AdaptiveDetector:
                         interpolation=cv2.INTER_CUBIC)
         bboxes, kpss = self.face_app.det_model.detect(up, input_size=(640, 640))
         faces = []
+        offset = np.array([x0, y0], dtype=np.float32)
         for i in range(bboxes.shape[0]):
             face = Face(bbox=bboxes[i, 0:4], kps=kpss[i], det_score=bboxes[i, 4])
+            # Landmark/pose models read the upscaled crop while the kps are
+            # still in crop space; recognition runs LAST, on the original
+            # plate, once kps are mapped back (same rationale as
+            # _detect_enhanced: identity scores must come from plate pixels).
             for taskname, model in self.face_app.models.items():
-                if taskname == "detection":
+                if taskname in ("detection", "recognition"):
                     continue
-                model.get(up, face)  # landmarks/embedding read the crop
-            offset = np.array([x0, y0], dtype=np.float32)
+                model.get(up, face)
             face.kps = face.kps / ADAPTIVE_ROI_UPSCALE + offset
             face.bbox = np.concatenate([
                 face.bbox[:2] / ADAPTIVE_ROI_UPSCALE + offset,
                 face.bbox[2:4] / ADAPTIVE_ROI_UPSCALE + offset,
             ])
+
+            # ROI retries exist to recover one SPECIFIC missing track: a
+            # detection elsewhere in the crop, or at an implausible scale
+            # for that track, is some other face and must not be injected
+            # on this track's credit (round 4).
+            face_center = np.asarray(face.kps).mean(axis=0)
+            spread = np.asarray(face.kps).max(axis=0) - np.asarray(face.kps).min(axis=0)
+            face_radius = 1.5 * float(np.hypot(*spread)) if spread.any() else 40.0
+            scale_ratio = face_radius / max(float(radius), 1e-6)
+            if (float(np.linalg.norm(face_center - np.asarray(center))) > radius
+                    or not ROI_MIN_SCALE_RATIO <= scale_ratio <= ROI_MAX_SCALE_RATIO):
+                self.stats["roi_filtered"] += 1
+                continue
+
+            rec_model = self.face_app.models.get("recognition")
+            if rec_model is not None:
+                rec_model.get(frame, face)
             faces.append(face)
         return faces
 
@@ -198,5 +228,6 @@ class AdaptiveDetector:
         return (
             f"adaptive detection: {s['retries']} retries on {s['dark_frames']} dark "
             f"frames (of {s['frames']}), {s['recovered_faces']} extra faces recovered; "
-            f"{s['roi_retries']} ROI retries recovered {s['roi_recovered']} more"
+            f"{s['roi_retries']} ROI retries recovered {s['roi_recovered']} more "
+            f"({s['roi_filtered']} off-region/off-scale detections filtered)"
         )

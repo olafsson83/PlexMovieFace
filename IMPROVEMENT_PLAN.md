@@ -53,11 +53,25 @@ that the plan gained rows. Work items, gated per landing on both suites:
    restoring exactly the frames the scramble protection withheld.
    Suite after: diehard 573 -> 552, brokeback 713 -> 700, hp 1021 held,
    0 wrong-person; render-probe compare PASS on every window.
-6. TODO -- redefine `proven` on strong hits and margins; reacquisition
-   after long gaps requires enter-level evidence + margin; no
-   position-only uncontested reacquisition at keep level.
-7. TODO -- ROI detections filtered to expected centre/scale; recognition
-   embeddings computed on the original plate after enhanced detection.
+6. DONE -- `proven` now counts STRONG hits explicitly (enter-level score
+   with best-vs-second margin; keep-level ride-through never qualifies,
+   as the old len(scores)>=3 silently allowed). Reacquisition after a
+   gap past TRACK_MISS_LIMIT owes enter-level evidence plus margin
+   before swapping resumes (short gaps owe keep, as before); the
+   position-only uncontested association carve-out no longer applies to
+   tracks missing for one or more passes -- position is continuity
+   evidence, and a gone track has no continuity to assert.
+7. DONE -- ROI re-detections are filtered to the missing track's expected
+   centre and a plausible scale (0.4-2.5x of the expected landmark
+   radius) before injection; recognition embeddings for BOTH adaptive
+   retry paths (enhanced full-frame, ROI) are computed on the original
+   plate -- identity thresholds were calibrated on plate pixels, and
+   gamma/CLAHE-shifted embeddings fed the identity machine uncalibrated
+   scores. Landmark/pose models still read the enhanced/upscaled image
+   (that is where the face is visible).
+   Combined suite after 6+7: hp 1021 / diehard 554 / brokeback 700,
+   0 wrong-person; 10 off-region/off-scale ROI detections filtered on
+   the diehard fixture; render-probe compare PASS on every window.
 
 ## v2 milestones (from external review, 2026-07-11)
 
