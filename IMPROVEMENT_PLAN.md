@@ -150,9 +150,26 @@ Loss ledger and fixes, in order of return on effort:
    485 -> 475 -- the dip is the reacquisition-proof guard withholding
    ride-out frames that previously swapped on stale credit; 0 wrong-person
    throughout.
-5. Pose-capable synthesis backend (the profile ceiling; torch stack) --
-   the only remaining lever for frames where identity is already CERTAIN
-   (measured 0.85) but five-point alignment cannot render the pose.
+5. DONE (2026-07-12) -- pose-capable backend (SimSwap 512, ONNX via
+   facefusion's conversion + crossface embedding converter; no torch
+   needed) and the hybrid router that makes it usable. Measured:
+   - SimSwap renders cleanly at 80+ degree yaw (frames 527/551, the
+     0:22/0:23 pain frames, now swap without warp breakage) BUT its
+     identity transfer is half-strength: similarity 0.53 vs inswapper's
+     0.85 (sharpness 114 vs 148, latency 208ms vs 134ms). Wholesale
+     replacement fails the identity bar; as the only option on a
+     near-profile frame it beats the untouched original face.
+   - SWAP_BACKEND=hybrid therefore routes per face: HYBRID_PRIMARY where
+     five-point alignment holds, SimSwap in the extreme band. Pose at
+     render time is estimated from the plan's own 5 landmarks (nose vs
+     mouth-midpoint offset along the roll-corrected eye axis, over
+     inter-eye distance) -- calibrated against buffalo_l 3D yaw on 925
+     fixture faces: threshold 0.85 gives 97% recall at |yaw|>65 with a
+     3.5% false-fire rate on frontal faces. No plan-format change; works
+     on flow-tracked/backfilled/bridged rows automatically.
+   - Die Hard proof run (analysis at MAX_ABS_YAW=85): pose gate withheld
+     20 detections instead of 88; 548 swaps = 448 inswapper + 100
+     SimSwap-routed extreme poses.
 
 ## Round-3 external review (tracking safety, integrated 2026-07-11)
 

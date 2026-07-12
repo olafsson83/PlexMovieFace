@@ -167,6 +167,16 @@ POSE_EXIT_MARGIN = float(os.environ.get("POSE_EXIT_MARGIN", "8"))
 # upscale (1.0 = full GFPGAN, which can over-beautify).
 GFPGAN_BLEND = float(os.environ.get("GFPGAN_BLEND", "0.8"))
 
+# SWAP_BACKEND=hybrid routes each face by pose: the primary backend where
+# five-point alignment holds, SimSwap 512 in the extreme-yaw band where the
+# alternative is the untouched original face. Yaw is estimated at render
+# time from the plan's 5 landmarks (nose-vs-mouth offset from the eye
+# midline, normalized by inter-eye distance); 0.85 was calibrated against
+# buffalo_l 3D-landmark yaw on real fixtures (97% recall at |yaw|>65,
+# 3.5% fire rate on frontal faces). Raise to route fewer faces to SimSwap.
+HYBRID_PRIMARY = os.environ.get("HYBRID_PRIMARY", "inswapper")
+HYBRID_PROXY_THRESHOLD = float(os.environ.get("HYBRID_PROXY_THRESHOLD", "0.85"))
+
 CTX_ID = int(os.environ.get("CTX_ID", "0"))
 
 # Phase 2: run full face detection every Nth frame; track kps (facial

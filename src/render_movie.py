@@ -85,6 +85,9 @@ def run_render(plan_path, sources, swapper):
 
     final_path = finalize_output()
     print(f"\n{plate_matcher.summary()}")
+    if hasattr(backend, "routed"):
+        print(f"hybrid routing: {backend.routed['primary']} primary, "
+              f"{backend.routed['extreme']} extreme-pose (SimSwap)")
     print(f"Done. {counts['swapped']} faces swapped (from the analysis plan). Output: {final_path}")
     return final_path
 
