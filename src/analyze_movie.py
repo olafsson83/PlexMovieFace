@@ -13,11 +13,13 @@ import sys
 import time
 
 import cv2
+import numpy as np
 from tqdm import tqdm
 
 from config import MOVIE_PATH, CLUSTERS_JSON, SOURCE_FACES_DIR, OUTPUT_DIR, DETECT_EVERY_N_FRAMES
 import adaptive_detection
 import analysis_store
+import bridging
 import face_engine
 import identity
 import tracking
@@ -59,7 +61,8 @@ def run_analysis(face_app, sources, use_tracking=True):
                                    counts, frame_index=frame_i)
             for face in active:
                 rows.append((frame_i, face.track_id if face.track_id is not None else -1,
-                             face.character_number, face.kps))
+                             face.character_number, face.kps,
+                             face.meta if face.meta is not None else analysis_store.make_meta()))
             frame_i += 1
             progress.update(1)
     finally:
@@ -75,9 +78,12 @@ def run_analysis(face_app, sources, use_tracking=True):
     )
     rows.extend(backfill)
     existing_pairs = {(r[0], r[1]) for r in rows}
-    bridged = identity.bridge_swap_rows(
+    bridge_stats = {}
+    bridged = bridging.bridge_swap_rows(
         identity_mgr.observation_log, existing_pairs,
         max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
+        frame_source=bridging.video_frame_source(MOVIE_PATH),
+        stats=bridge_stats,
     )
     rows.extend(bridged)
     rows.sort(key=lambda r: r[0])
@@ -95,15 +101,19 @@ def run_analysis(face_app, sources, use_tracking=True):
         "tracking_quality": tracker.stats,
         "backfilled_rows": len(backfill),
         "bridged_rows": len(bridged),
+        "bridge_verification": bridge_stats,
         "analysis_seconds": round(time.time() - start, 1),
     }
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     path = analysis_store.save_plan(artifact_path(), header, rows)
+    extreme = sum(1 for r in rows
+                  if not np.isnan(r[4]["yaw"]) and abs(r[4]["yaw"]) > 65)
     print(detector.summary())
     print(tracker.summary())
-    print(f"pose gate: {counts.get('unrenderable_events', 0)} unrenderable detections withheld")
+    print(f"pose evidence: {extreme} rows past 65 degrees yaw kept for the "
+          "render pass to gate per backend")
     print(f"retroactive backfill: {len(backfill)} pre-confirmation frames recovered")
-    print(f"anchor bridging: {len(bridged)} mid-shot gap frames recovered")
+    print(bridging.summary(bridge_stats))
     print(f"Analysis complete: {len(rows)} swap decisions across {frame_i} frames -> {path}")
     return path
 

@@ -83,15 +83,17 @@ def run_fixture_analysis(fixture, out_dir):
         identity_mgr.observation_log, thresholds,
         max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
     )
-    for frame, track_id, number, kps in backfill:
+    for frame, track_id, number, kps, _meta in backfill:
         center = np.asarray(kps).mean(axis=0)
         rows.append((frame, number, float(center[0]), float(center[1])))
         covered_pairs.add((frame, track_id))
-    bridged = identity.bridge_swap_rows(
+    import bridging
+    bridged = bridging.bridge_swap_rows(
         identity_mgr.observation_log, covered_pairs,
         max_gap_frames=DETECT_EVERY_N_FRAMES * 3,
+        frame_source=bridging.video_frame_source(REPO_ROOT / fixture["clip"]),
     )
-    for frame, _track_id, number, kps in bridged:
+    for frame, _track_id, number, kps, _meta in bridged:
         center = np.asarray(kps).mean(axis=0)
         rows.append((frame, number, float(center[0]), float(center[1])))
     rows.sort(key=lambda r: r[0])

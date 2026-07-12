@@ -18,8 +18,7 @@
         "SOURCE_FACES_DIR": "source_faces_diehard",
         "OUTPUT_DIR": "output_diehard",
         "MATCH_THRESHOLD": "0.45",
-        "MAINTAIN_THRESHOLD": "0.25",
-        "MAX_ABS_YAW": "85"
+        "MAINTAIN_THRESHOLD": "0.25"
       },
       "windows": [
         {"name": "t22_yaw81", "frames": [520, 535]},

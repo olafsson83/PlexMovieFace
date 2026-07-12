@@ -24,16 +24,17 @@ to a face *track*:
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
+import analysis_store
 import face_engine
 from config import (
     MATCH_THRESHOLD, MAINTAIN_THRESHOLD, MIN_MARGIN, STRONG_ENTER_MARGIN,
     CONFIRM_FRAMES, REJECT_FRAMES, TRACK_MISS_LIMIT, IDENTITY_AUTO_CALIBRATION,
-    THRESHOLDS_EXPLICIT, POSE_GATE, MAX_ABS_YAW, POSE_EXIT_MARGIN,
-    PROVEN_TRACK_MISS_LIMIT, PENDING_WINDOW,
+    THRESHOLDS_EXPLICIT, PROVEN_TRACK_MISS_LIMIT, PENDING_WINDOW,
 )
 
 # Below this, cosine scores are noise regardless of what calibration says.
@@ -149,7 +150,6 @@ class _Track:
     missing: int = 0
     scores: list = field(default_factory=list)  # recent accepted-group scores
     embedding: np.ndarray | None = None  # last observation's embedding
-    pose_blocked: bool = False           # currently beyond the renderable yaw range
     needs_proof: bool = False            # just reacquired after a gap: must
                                          # clear KEEP before the ride-out applies
 
@@ -176,14 +176,25 @@ class Observation:
     group_scores: dict           # group id -> best member score this frame
     swapped_number: str | None   # number swapped this frame, else None
     accepted_group: str | None   # track's accepted group AFTER this frame
-    renderable: bool = True      # False when the pose gate blocked this frame
+    renderable: bool = True      # legacy field; pose gating now happens at render
+    yaw: float | None = None     # buffalo_l 3D-landmark pose, when available
+    pitch: float | None = None
+    roll: float | None = None
+    det_score: float | None = None
+    margin: float | None = None  # accepted-group score minus best competitor
 
 
-def _face_yaw(face):
+def _face_pose(face):
+    """(pitch, yaw, roll) from buffalo_l's 3D landmark model, or None."""
     pose = getattr(face, "pose", None)
     if pose is None:
         return None
-    return float(pose[1])  # insightface order: pitch, yaw, roll
+    return float(pose[0]), float(pose[1]), float(pose[2])
+
+
+def _face_yaw(face):
+    pose = _face_pose(face)
+    return None if pose is None else pose[1]
 
 
 def _center(kps):
@@ -340,21 +351,16 @@ class TrackIdentityManager:
             track.embedding = np.asarray(face.normed_embedding, dtype=np.float32)
             touched.add(id(track))
 
-            # Pose gate with hysteresis: block past MAX_ABS_YAW, unblock only
-            # once safely back inside the range. A blocked frame is
-            # "unrenderable" -- the track keeps its identity and evidence,
-            # but no swap row is emitted (a brief original face beats a
-            # broken five-point profile warp).
-            yaw = _face_yaw(face) if POSE_GATE else None
-            if yaw is not None:
-                if track.pose_blocked:
-                    if abs(yaw) < MAX_ABS_YAW - POSE_EXIT_MARGIN:
-                        track.pose_blocked = False
-                elif abs(yaw) > MAX_ABS_YAW:
-                    track.pose_blocked = True
+            # Pose is recorded as row evidence, never used to discard an
+            # identity-certain observation here: whether a given yaw is
+            # renderable depends on the swap backend, which analysis cannot
+            # know. The render pass gates per backend (render_movie.py).
+            pose = _face_pose(face)
 
             scores, group_scores, group_best_number, unmapped_best = self._score(face)
             swapped = False
+            swap_score = None
+            swap_margin = None
 
             if track.identity is not None:
                 gid = track.identity
@@ -368,6 +374,7 @@ class TrackIdentityManager:
                     track.scores.append(s)
                     del track.scores[:-8]  # bounded history for `proven`
                     swapped = True
+                    swap_score, swap_margin = s, s - competitor
                 elif competitor >= t.enter and competitor - s >= MIN_MARGIN:
                     # Clear evidence this face is someone else entirely --
                     # don't ride out the rejection streak, drop now.
@@ -382,6 +389,7 @@ class TrackIdentityManager:
                         track.keep_fails = 0
                     elif not track.needs_proof:
                         swapped = True  # hysteresis: ride out a brief dip
+                        swap_score, swap_margin = s, s - competitor
 
             if track.identity is None and not swapped:
                 best_gid = max(group_scores, key=group_scores.get, default=None)
@@ -397,6 +405,7 @@ class TrackIdentityManager:
                     if qualified and s >= t.strong:
                         self._accept(track, best_gid, group_best_number[best_gid], s)
                         swapped = True
+                        swap_score, swap_margin = s, margin
                     elif qualified:
                         if track.pending_group == best_gid:
                             track.pending_count += 1
@@ -409,6 +418,7 @@ class TrackIdentityManager:
                         if track.pending_count >= CONFIRM_FRAMES:
                             self._accept(track, best_gid, group_best_number[best_gid], s)
                             swapped = True
+                            swap_score, swap_margin = s, margin
                     elif track.pending_group is not None:
                         # Unqualified frames (blur dipping under the enter
                         # bar) merely AGE a pending candidate instead of
@@ -421,15 +431,21 @@ class TrackIdentityManager:
                             track.pending_count = 0
                             track.pending_age = 0
 
-            if swapped and track.pose_blocked:
-                # Identity evidence is kept (keep-fails cleared, scores
-                # recorded); only the render is withheld.
-                swapped = False
-                if counts is not None:
-                    counts["unrenderable_events"] = counts.get("unrenderable_events", 0) + 1
-
             if swapped:
-                swappable.append((face.kps, track.identity_number, track.track_id))
+                keep = self.thresholds[track.identity].keep
+                meta = analysis_store.make_meta(
+                    pitch=None if pose is None else pose[0],
+                    yaw=None if pose is None else pose[1],
+                    roll=None if pose is None else pose[2],
+                    det_score=float(getattr(face, "det_score", math.nan)),
+                    identity_score=swap_score,
+                    margin=swap_margin,
+                    provenance="detector",
+                    # Ride-out frames (below keep, surviving on hysteresis)
+                    # are weaker evidence than keep-cleared ones.
+                    confidence=1.0 if swap_score is not None and swap_score >= keep else 0.7,
+                )
+                swappable.append((face.kps, track.identity_number, track.track_id, meta))
             elif counts is not None:
                 best_n = max(scores, key=scores.get) if scores else None
                 if best_n is not None and best_n in self.groups:
@@ -445,7 +461,11 @@ class TrackIdentityManager:
                     group_scores=dict(group_scores),
                     swapped_number=track.identity_number if swapped else None,
                     accepted_group=track.identity,
-                    renderable=not track.pose_blocked,
+                    yaw=None if pose is None else pose[1],
+                    pitch=None if pose is None else pose[0],
+                    roll=None if pose is None else pose[2],
+                    det_score=float(getattr(face, "det_score", math.nan)),
+                    margin=swap_margin,
                 ))
 
         # Age out tracks no detection claimed this pass.
@@ -467,6 +487,29 @@ class TrackIdentityManager:
         track.scores = [score]
 
 
+def _lerp(a, b, t):
+    """Linear interpolation tolerant of missing evidence (None/NaN)."""
+    if a is None or b is None:
+        return None
+    a, b = float(a), float(b)
+    if math.isnan(a) or math.isnan(b):
+        return None
+    return (1 - t) * a + t * b
+
+
+def _interp_meta(a, b, t, score_a, score_b, provenance, confidence):
+    """Row meta for a frame interpolated between two anchor Observations."""
+    return analysis_store.make_meta(
+        yaw=_lerp(a.yaw, b.yaw, t),
+        pitch=_lerp(a.pitch, b.pitch, t),
+        roll=_lerp(a.roll, b.roll, t),
+        identity_score=_lerp(score_a, score_b, t),
+        margin=_lerp(a.margin, b.margin, t),
+        provenance=provenance,
+        confidence=confidence,
+    )
+
+
 # --- retroactive backfill (future evidence) -----------------------------------
 
 def backfill_swap_rows(observation_log, thresholds, max_gap_frames):
@@ -485,7 +528,8 @@ def backfill_swap_rows(observation_log, thresholds, max_gap_frames):
     interpolated landmarks -- the same 5-frame-scale gap optical flow
     bridges on the forward path.
 
-    Returns rows shaped like the analysis plan: (frame, track_id, number, kps).
+    Returns rows shaped like the analysis plan: (frame, track_id, number,
+    kps, meta).
     """
     by_track = {}
     for obs in observation_log:
@@ -522,46 +566,15 @@ def backfill_swap_rows(observation_log, thresholds, max_gap_frames):
                     continue  # acceptance frame is already in the plan
                 t = (frame - a.frame_index) / span if span else 0.0
                 kps = (1 - t) * a.kps + t * b.kps
-                rows.append((frame, track_id, number, kps.astype(np.float32)))
+                meta = _interp_meta(a, b, t,
+                                    a.group_scores.get(gid), b.group_scores.get(gid),
+                                    provenance="backfill", confidence=0.6)
+                rows.append((frame, track_id, number, kps.astype(np.float32), meta))
     return rows
 
 
-def bridge_swap_rows(observation_log, existing_pairs, max_gap_frames):
-    """Fills INTERIOR track gaps between two detector-verified swapped
-    observations -- where optical-flow propagation failed mid-shot (quality
-    gate, lost points), the in-between frames used to be lost even though
-    the same physical track was confidently swapped on both sides.
-    Interpolating landmarks between two verified detection anchors is far
-    safer than LK through the murk that killed the propagation.
-
-    Only CONSECUTIVE observations of a track are bridged, and only when
-    both were actually swapped as the same character: any contradicting
-    evidence inside the gap (a pose-blocked frame, an identity dropout, a
-    reclassification) appears as an intermediate observation and splits the
-    pair, blocking the bridge by construction. Cuts can't be bridged either
-    -- the identity manager mints a new track_id at every cut. Frames the
-    plan already covers (successful propagation, backfill) are skipped via
-    existing_pairs: a set of (frame_index, track_id).
-
-    Returns rows shaped like the analysis plan: (frame, track_id, number, kps).
-    """
-    by_track = {}
-    for obs in observation_log:
-        by_track.setdefault(obs.track_id, []).append(obs)
-
-    rows = []
-    for track_id, obs_list in by_track.items():
-        obs_list.sort(key=lambda o: o.frame_index)
-        for a, b in zip(obs_list[:-1], obs_list[1:]):
-            if (a.swapped_number is None or a.swapped_number != b.swapped_number):
-                continue
-            span = b.frame_index - a.frame_index
-            if span <= 1 or span > max_gap_frames:
-                continue
-            for frame in range(a.frame_index + 1, b.frame_index):
-                if (frame, track_id) in existing_pairs:
-                    continue
-                t = (frame - a.frame_index) / span
-                kps = (1 - t) * a.kps + t * b.kps
-                rows.append((frame, track_id, a.swapped_number, kps.astype(np.float32)))
-    return rows
+# Gap bridging lives in bridging.py: long gaps are verified by
+# bidirectional optical tracking through the same safety gates as the
+# live tracker (linear interpolation restored rows through intervals
+# where flow was REJECTED, undoing the scramble protection);
+# interpolation survives only for gaps of at most two frames.

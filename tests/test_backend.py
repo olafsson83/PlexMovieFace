@@ -31,8 +31,10 @@ PROFILE_KPS = np.array(
 
 
 class FakeTarget:
-    def __init__(self, kps):
+    def __init__(self, kps, meta=None, track_id=None):
         self.kps = np.asarray(kps, dtype=np.float32)
+        self.meta = meta
+        self.track_id = track_id
 
 
 class FakeSimswapSession:
@@ -50,6 +52,25 @@ class FakeConverterSession:
     def run(self, _, feed):
         assert feed["input"].shape == (1, 512)
         return [feed["input"] * 4.0]  # non-normalized on purpose
+
+
+class FakeArm:
+    """Recording stand-in for a hybrid arm."""
+
+    def __init__(self, tag, reliable=80):
+        self.tag = tag
+        self.reliable = reliable
+        self.calls = []
+
+    def prepare_source(self, source_face):
+        return f"{self.tag}-prep"
+
+    def swap(self, frame, target_face, prepared_source):
+        self.calls.append(prepared_source)
+        return np.zeros((8, 8, 3), dtype=np.uint8), np.eye(2, 3)
+
+    def capabilities(self):
+        return {"name": self.tag, "reliable_abs_yaw": self.reliable}
 
 
 class BackendTests(unittest.TestCase):
@@ -72,10 +93,61 @@ class BackendTests(unittest.TestCase):
     def test_warp_by_template_maps_kps_to_template_positions(self):
         frame = np.zeros((300, 300, 3), dtype=np.uint8)
         kps = ARCFACE_112_V1 * 512.0  # already in perfect template position
-        crop, M = warp_by_template(frame, kps, ARCFACE_112_V1, 512)
+        crop, M, inliers = warp_by_template(frame, kps, ARCFACE_112_V1, 512)
         self.assertEqual(crop.shape, (512, 512, 3))
+        self.assertEqual(int(inliers.sum()), 5)
         mapped = kps @ M[:, :2].T + M[:, 2]
         np.testing.assert_allclose(mapped, ARCFACE_112_V1 * 512.0, atol=0.5)
+
+    def test_alignment_validation_accepts_genuine_and_rejects_scramble(self):
+        from swap_backend import validate_alignment
+        frame_shape = (300, 300, 3)
+        good = ARCFACE_112_V1 * 200.0 + 40.0
+        _, M, inl = warp_by_template(np.zeros(frame_shape, np.uint8), good,
+                                     ARCFACE_112_V1, 512)
+        report = validate_alignment(M, inl, good, ARCFACE_112_V1, 512, frame_shape)
+        self.assertTrue(report["valid"])
+        self.assertLess(report["residual_fraction"], 0.01)
+        self.assertFalse(report["reflection"])
+
+        # Scrambled landmarks (the LK-corruption shape): eyes collapsed onto
+        # the mouth line -- no similarity to the template explains them.
+        scrambled = np.array([[100, 200], [102, 200], [150, 90],
+                              [100, 202], [104, 201]], dtype=np.float32)
+        _, M2, inl2 = warp_by_template(np.zeros(frame_shape, np.uint8), scrambled,
+                                       ARCFACE_112_V1, 512)
+        report2 = validate_alignment(M2, inl2, scrambled, ARCFACE_112_V1, 512,
+                                     frame_shape)
+        self.assertFalse(report2["valid"])
+
+    def test_alignment_validation_rejects_mostly_offframe_face(self):
+        from swap_backend import validate_alignment
+        frame_shape = (300, 300, 3)
+        # Genuine geometry, but positioned so most of the crop samples
+        # outside the frame (BORDER_REPLICATE smear territory).
+        kps = ARCFACE_112_V1 * 200.0 + np.array([260.0, 40.0])
+        _, M, inl = warp_by_template(np.zeros(frame_shape, np.uint8), kps,
+                                     ARCFACE_112_V1, 512)
+        report = validate_alignment(M, inl, kps, ARCFACE_112_V1, 512, frame_shape)
+        self.assertFalse(report["valid"])
+        self.assertEqual(report["reason"], "coverage")
+
+    def test_simswap_withholds_invalid_alignment_and_matcher_passes_through(self):
+        import plate_matching
+        backend = SimswapBackend(FakeSimswapSession(), FakeConverterSession())
+        scrambled = np.array([[100, 200], [102, 200], [150, 90],
+                              [100, 202], [104, 201]], dtype=np.float32)
+        frame = np.full((300, 300, 3), 90, dtype=np.uint8)
+        crop, M = backend.swap(frame, FakeTarget(scrambled), np.zeros((1, 512), np.float32))
+        self.assertIsNone(crop)
+        self.assertEqual(backend.alignment_stats["withheld"], 1)
+
+        matcher = plate_matching.PlateMatcher(backend)
+        class FakeSource:
+            embedding = np.ones(512, dtype=np.float32)
+        out = matcher.swap(frame, FakeTarget(scrambled, track_id=1), FakeSource())
+        np.testing.assert_array_equal(out, frame)  # plate untouched
+        self.assertEqual(matcher.backend_withheld, 1)
 
     def test_simswap_backend_contract(self):
         session = FakeSimswapSession()
@@ -115,23 +187,8 @@ class BackendTests(unittest.TestCase):
             yaw_proxy(PROFILE_KPS @ rot.T), yaw_proxy(PROFILE_KPS), places=6
         )
 
-    def test_hybrid_routes_by_pose(self):
-        class Recorder:
-            def __init__(self, tag):
-                self.tag = tag
-                self.calls = []
-
-            def prepare_source(self, source_face):
-                return f"{self.tag}-prep"
-
-            def swap(self, frame, target_face, prepared_source):
-                self.calls.append(prepared_source)
-                return np.zeros((8, 8, 3), dtype=np.uint8), np.eye(2, 3)
-
-            def capabilities(self):
-                return {"name": self.tag, "reliable_abs_yaw": 80}
-
-        primary, extreme = Recorder("p"), Recorder("e")
+    def test_hybrid_falls_back_to_proxy_without_pose_evidence(self):
+        primary, extreme = FakeArm("p"), FakeArm("e")
         backend = HybridBackend(primary, extreme, threshold=0.85)
         prepared = backend.prepare_source("src")
         self.assertEqual(prepared, {"primary": "p-prep", "extreme": "e-prep"})
@@ -140,6 +197,44 @@ class BackendTests(unittest.TestCase):
         backend.swap(None, FakeTarget(PROFILE_KPS), prepared)
         self.assertEqual(primary.calls, ["p-prep"])   # frontal -> primary
         self.assertEqual(extreme.calls, ["e-prep"])   # profile -> SimSwap
+        self.assertEqual(backend.routed, {"primary": 1, "extreme": 1})
+        self.assertEqual(backend.proxy_fallbacks, 2)
+
+    def test_hybrid_routes_on_stored_pose_over_proxy(self):
+        primary, extreme = FakeArm("p", reliable=65), FakeArm("e", reliable=80)
+        backend = HybridBackend(primary, extreme, threshold=0.85)
+        prepared = backend.prepare_source("src")
+        # FRONTAL landmarks (proxy would say primary) but stored yaw says 80:
+        # the actual Buffalo pose must win.
+        backend.swap(None, FakeTarget(FRONTAL_KPS, meta={"yaw": 80.0}, track_id=1),
+                     prepared)
+        self.assertEqual(extreme.calls, ["e-prep"])
+        self.assertEqual(backend.proxy_fallbacks, 0)
+
+    def test_hybrid_route_hysteresis_and_transition_log(self):
+        primary, extreme = FakeArm("p", reliable=65), FakeArm("e", reliable=80)
+        backend = HybridBackend(primary, extreme, threshold=0.85)
+        prepared = backend.prepare_source("src")
+        # Min-hold: entering extreme is immediate; returning to primary
+        # needs the extreme stint to have lasted POSE_MIN_HOLD (3) swaps.
+        for yaw in [80, 60, 50, 60]:
+            backend.swap(None, FakeTarget(FRONTAL_KPS, meta={"yaw": float(yaw)},
+                                          track_id=7), prepared)
+        self.assertEqual(backend.routed, {"primary": 1, "extreme": 3})
+        self.assertEqual(backend.transition_count, 1)
+        self.assertEqual(backend.transitions[0]["from"], "extreme")
+        self.assertEqual(backend.transitions[0]["to"], "primary")
+        self.assertEqual(backend.transitions[0]["track_id"], 7)
+
+    def test_hybrid_extreme_entry_is_immediate(self):
+        # The safety direction must never wait out a hold: a fresh primary
+        # track that turns past the limit routes extreme on that same swap.
+        primary, extreme = FakeArm("p", reliable=65), FakeArm("e", reliable=80)
+        backend = HybridBackend(primary, extreme, threshold=0.85)
+        prepared = backend.prepare_source("src")
+        for yaw in [30, 70]:
+            backend.swap(None, FakeTarget(FRONTAL_KPS, meta={"yaw": float(yaw)},
+                                          track_id=9), prepared)
         self.assertEqual(backend.routed, {"primary": 1, "extreme": 1})
 
     def test_unknown_backend_rejected(self):

@@ -1,4 +1,7 @@
-"""Unit tests for v2 milestone 6: pose gating / unrenderable frames. Run:
+"""Unit tests for pose handling. Since plan v3 the analysis pass records
+pose as row evidence and never discards identity-certain extreme-pose
+observations; the RENDER pass gates per selected backend (RenderPoseGate),
+with per-track hysteresis. Run:
 
     python -m unittest tests.test_pose_gate
 """
@@ -11,6 +14,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from identity import GroupThresholds, Observation, TrackIdentityManager, backfill_swap_rows
+from swap_backend import RenderPoseGate
+from tracking import TrackedFace
 
 DIM = 32
 KPS = np.array([[45, 45], [55, 45], [50, 50], [45, 55], [55, 55]], dtype=np.float32)
@@ -43,33 +48,78 @@ def manager():
     return TrackIdentityManager(CENTROIDS, {"1": object()}, groups, thresholds)
 
 
-class PoseGateTests(unittest.TestCase):
-    def test_extreme_yaw_withholds_swap_but_keeps_identity(self):
-        mgr = manager()
-        counts = {"unmatched_events": 0, "no_photo_events": 0}
-        self.assertEqual(len(mgr.observe([FakeFace(0.9, yaw=0)], counts=counts)), 1)
-        # Head turns past the limit: no swap emitted, but no re-confirmation
-        # needed when it comes back.
-        out = mgr.observe([FakeFace(0.9, yaw=80)], counts=counts)
-        self.assertEqual(out, [])
-        self.assertEqual(counts.get("unrenderable_events"), 1)
-        out = mgr.observe([FakeFace(0.9, yaw=10)], counts=counts)
-        self.assertEqual(len(out), 1)  # instant resume, identity was retained
-
-    def test_hysteresis_holds_near_the_limit(self):
+class AnalysisPoseEvidenceTests(unittest.TestCase):
+    def test_extreme_yaw_row_is_kept_with_pose_evidence(self):
+        # Analysis cannot know the backend, so an identity-certain profile
+        # face must reach the plan -- with its yaw recorded for the render
+        # gate to act on.
         mgr = manager()
         mgr.observe([FakeFace(0.9, yaw=0)])
-        mgr.observe([FakeFace(0.9, yaw=80)])         # blocked
-        out = mgr.observe([FakeFace(0.9, yaw=60)])   # inside limit but not exit margin
-        self.assertEqual(out, [])                    # still blocked (65 - 8 = 57)
-        out = mgr.observe([FakeFace(0.9, yaw=50)])   # safely inside
+        out = mgr.observe([FakeFace(0.9, yaw=80)])
         self.assertEqual(len(out), 1)
+        kps, number, track_id, meta = out[0]
+        self.assertAlmostEqual(meta["yaw"], 80.0, places=4)
+        self.assertEqual(meta["provenance"], "detector")
+        self.assertAlmostEqual(meta["det_score"], 0.9, places=4)
+        self.assertGreater(meta["identity_score"], 0.85)
+        self.assertGreater(meta["margin"], 0.0)
 
-    def test_faces_without_pose_are_unaffected(self):
+    def test_faces_without_pose_get_nan_yaw(self):
         mgr = manager()
         face = FakeFace(0.9, yaw=0)
         del face.pose
-        self.assertEqual(len(mgr.observe([face])), 1)
+        out = mgr.observe([face])
+        self.assertEqual(len(out), 1)
+        self.assertTrue(np.isnan(out[0][3]["yaw"]))
+
+
+class FakeBackend:
+    def __init__(self, reliable=65):
+        self.reliable = reliable
+
+    def capabilities(self):
+        return {"name": "fake", "reliable_abs_yaw": self.reliable}
+
+
+def face_with_yaw(yaw, track_id=1):
+    meta = {"yaw": yaw, "provenance": "detector"}
+    return TrackedFace(KPS, "1", track_id, meta)
+
+
+class RenderPoseGateTests(unittest.TestCase):
+    def test_gate_withholds_beyond_backend_capability(self):
+        gate = RenderPoseGate(FakeBackend(reliable=65))
+        gate.enabled, gate.limit = True, 65.0
+        self.assertTrue(gate.renderable(face_with_yaw(30)))
+        self.assertFalse(gate.renderable(face_with_yaw(80)))
+        self.assertEqual(gate.withheld, 1)
+
+    def test_min_hold_hysteresis_near_the_limit(self):
+        # Blocking is immediate; unblocking needs the blocked stint to have
+        # lasted POSE_MIN_HOLD (3) rows -- jitter can't strobe the swap.
+        gate = RenderPoseGate(FakeBackend(reliable=65))
+        gate.enabled, gate.limit = True, 65.0
+        self.assertFalse(gate.renderable(face_with_yaw(80)))   # blocked (stint 1)
+        self.assertFalse(gate.renderable(face_with_yaw(60)))   # stint 2
+        self.assertFalse(gate.renderable(face_with_yaw(60)))   # stint 3
+        self.assertTrue(gate.renderable(face_with_yaw(60)))    # held long enough
+        self.assertTrue(gate.renderable(face_with_yaw(60)))
+
+    def test_rows_without_pose_keep_track_state(self):
+        gate = RenderPoseGate(FakeBackend(reliable=65))
+        gate.enabled, gate.limit = True, 65.0
+        self.assertFalse(gate.renderable(face_with_yaw(80, track_id=3)))
+        # A flow row without fresh pose inherits its track's blocked state...
+        flow = TrackedFace(KPS, "1", 3, {"yaw": float("nan"), "provenance": "flow"})
+        self.assertFalse(gate.renderable(flow))
+        # ...and an unblocked track's pose-less rows render.
+        other = TrackedFace(KPS, "1", 4, None)
+        self.assertTrue(gate.renderable(other))
+
+    def test_disabled_gate_passes_everything(self):
+        gate = RenderPoseGate(FakeBackend(reliable=65))
+        gate.enabled = False
+        self.assertTrue(gate.renderable(face_with_yaw(89)))
 
 
 THRESHOLDS = {"G1": GroupThresholds(0.7, 0.6, 0.82, "env")}

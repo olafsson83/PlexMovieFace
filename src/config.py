@@ -149,17 +149,20 @@ PROVEN_TRACK_MISS_LIMIT = int(os.environ.get("PROVEN_TRACK_MISS_LIMIT", "6"))
 # blur oscillating around the enter bar shouldn't restart confirmation.
 PENDING_WINDOW = int(os.environ.get("PENDING_WINDOW", "6"))
 
-# v2 milestone 6: refuse to swap frames the backend can't render well
-# instead of quietly producing a bad warped profile. inswapper_128's
-# five-point alignment degrades hard past strong yaw; an original face for
-# a few frames beats a broken swap.
+# v2 milestone 6 (moved to the RENDER pass in plan v3): refuse to swap
+# frames the backend can't render well instead of quietly producing a bad
+# warped profile. Analysis keeps identity-certain extreme-pose rows (with
+# their pose stored as evidence); the render pass withholds them per the
+# selected backend's capability.
 POSE_GATE = os.environ.get("POSE_GATE", "true").lower() == "true"
-# |yaw| in degrees beyond which an observation is unrenderable.
+# Operator override for the render gate's |yaw| limit. Unset, the limit is
+# the selected backend's own reliable_abs_yaw capability (explicit .env
+# values win, same precedence rule as THRESHOLDS_EXPLICIT).
+MAX_ABS_YAW_EXPLICIT = "MAX_ABS_YAW" in os.environ
 MAX_ABS_YAW = float(os.environ.get("MAX_ABS_YAW", "65"))
-# Hysteresis: a blocked track becomes renderable again below
-# MAX_ABS_YAW - POSE_EXIT_MARGIN, so yaw oscillating at the limit doesn't
-# flicker the swap on and off.
-POSE_EXIT_MARGIN = float(os.environ.get("POSE_EXIT_MARGIN", "8"))
+# (Hysteresis for the gate and hybrid routing is asymmetric min-hold --
+# see POSE_MIN_HOLD in swap_backend.py; the old POSE_EXIT_MARGIN band
+# measurably delayed recovery on genuine turn-backs and was removed.)
 
 # v2 milestone 7: SWAP_BACKEND selects the synthesis backend (see
 # swap_backend.py). inswapper_gfpgan chains GFPGAN restoration at 512px

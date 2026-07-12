@@ -477,6 +477,7 @@ class PlateMatcher:
         self.grain = GrainMatcher() if GRAIN_MATCHING else None
         self._swap_counter = 0
         self._prepared = {}  # id(source_face) -> backend-prepared source
+        self.backend_withheld = 0
 
     def swap(self, frame, tracked_face, source_face):
         prepared = self._prepared.get(id(source_face))
@@ -484,6 +485,11 @@ class PlateMatcher:
             prepared = self.backend.prepare_source(source_face)
             self._prepared[id(source_face)] = prepared
         bgr_fake, M = self.backend.swap(frame, tracked_face, prepared)
+        if bgr_fake is None:
+            # The backend withheld (e.g. invalid alignment): the original
+            # plate face beats guaranteed-garbage inference.
+            self.backend_withheld += 1
+            return frame
         self._swap_counter += 1
         center = np.asarray(tracked_face.kps).mean(axis=0)
         # Temporal state belongs to the physical face track, not the semantic
@@ -531,4 +537,7 @@ class PlateMatcher:
             parts.append(self.sharpness.summary())
         if self.grain is not None:
             parts.append(self.grain.summary())
+        if self.backend_withheld:
+            parts.append(f"backend withheld {self.backend_withheld} swaps "
+                         "(invalid alignment)")
         return "\n".join(parts) if parts else "plate matching disabled"

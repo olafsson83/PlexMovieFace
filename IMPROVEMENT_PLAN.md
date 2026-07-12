@@ -1,5 +1,64 @@
 # Plate-matching & identity roadmap
 
+## Round-4 external review (rendered-output quality, 2026-07-12)
+
+Directive accepted: do not optimise total swap count further until rendered
+output is measured -- the plan-level suite cannot see scrambled geometry,
+weak identity transfer, backend flicker or malformed composites. Acceptance
+now means the RENDERED OUTPUT improved (evaluate_render.py --compare), not
+that the plan gained rows. Work items, gated per landing on both suites:
+
+1. DONE -- rendered-output harness (src/evaluate_render.py +
+   tests/fixtures/render_manifest.json): probe windows on the user's exact
+   pain frames render through the real backend/plate-matching path and
+   measure identity gain over the untouched plate, alignment residual,
+   temporal instability, per-track routing/transitions, plus a crop strip
+   per window for human approval. First baseline immediately quantified
+   the SimSwap problem: identity gain 0.01 at yaw 81 vs 0.83 frontal.
+2. DONE -- plan format v3 (analysis_store): every row carries actual
+   pitch/yaw/roll, det_score, identity score, margin, provenance
+   (detector/flow/backfill/bridge) and confidence. Analysis no longer
+   discards identity-certain extreme-pose observations (it cannot know the
+   backend); the RENDER pass gates them per selected backend capability
+   (swap_backend.RenderPoseGate), with an explicit MAX_ABS_YAW .env value
+   still overriding as operator intent.
+3. DONE -- hybrid routing on actual buffalo_l pose from the plan row;
+   yaw_proxy demoted to low-confidence fallback for rows without pose
+   evidence; transitions logged. Hysteresis is asymmetric min-hold (enter
+   the safe arm immediately, return after a 3-swap hold): the original
+   margin-band exit (57 degrees) measurably kept 63-degree frames on the
+   weak SimSwap arm, forfeiting 0.8+ identity gain (t23 probe); min-hold
+   recovers them (window gain 0.212 -> 0.249) while still bounding
+   route flicker. Render-probe compare vs pre-v3 baseline: PASS on all
+   windows; t36 min out_sim 0.073 -> 0.557 (a proxy false-fire eliminated
+   by real pose).
+4. DONE -- SimSwap alignment validation before inference
+   (swap_backend.validate_alignment): RANSAC reprojection threshold now
+   scales with the crop (facefusion's hardcoded 100 rejects nothing at
+   512); inlier count, residual normalised by crop size, scale, rotation,
+   reflection (impossible under partial affine, recorded for audit) and
+   frame coverage (BORDER_REPLICATE smear guard) are measured per swap;
+   invalid transforms are withheld (backend returns None; the plate stays
+   untouched and PlateMatcher counts it). Residual ceiling 0.18 grounded
+   in measured genuine faces: frontal 0.03-0.06, genuine extreme 0.13.
+5. DONE -- bidirectional-tracking bridge (bridging.py, replacing
+   identity.bridge_swap_rows): long gaps are re-tracked forward from the
+   previous anchor and backward from the next through the LITERAL same
+   per-step gates as the live tracker (tracking.propagate_kps, shared
+   code); a frame is emitted only when both trajectories survive and
+   agree within a face-scaled tolerance. Pure interpolation only for
+   gaps <= 2 frames. Field result vindicates the review: on the fixture
+   clips ZERO long-gap frames survived verification (114 unverified + 10
+   disagreeing on diehard alone) -- the old interpolation had been
+   restoring exactly the frames the scramble protection withheld.
+   Suite after: diehard 573 -> 552, brokeback 713 -> 700, hp 1021 held,
+   0 wrong-person; render-probe compare PASS on every window.
+6. TODO -- redefine `proven` on strong hits and margins; reacquisition
+   after long gaps requires enter-level evidence + margin; no
+   position-only uncontested reacquisition at keep level.
+7. TODO -- ROI detections filtered to expected centre/scale; recognition
+   embeddings computed on the original plate after enhanced detection.
+
 ## v2 milestones (from external review, 2026-07-11)
 
 External review verdict, accepted: phases below fixed identity correctness

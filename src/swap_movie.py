@@ -119,12 +119,16 @@ def process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts, 
         return tracker.start_from_detection(
             gray, swappable, all_kps, scene_cut=scene_cut
         )
-    return [tracking.TrackedFace(kps, number, track_id)
-            for kps, number, track_id in swappable]
+    return [tracking.TrackedFace(kps, number, track_id, meta)
+            for kps, number, track_id, meta in swappable]
 
 
-def swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts):
+def swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts,
+                   pose_gate=None):
     for face in active_faces:
+        if pose_gate is not None and not pose_gate.renderable(face):
+            counts["pose_withheld"] = counts.get("pose_withheld", 0) + 1
+            continue
         frame = plate_matcher.swap(frame, face, sources[face.character_number])
         counts["swapped"] += 1
     try:
@@ -154,6 +158,8 @@ def run_calibration(cap, fps, width, height, face_app, plate_matcher, identity_m
     tmp_path = OUTPUT_DIR / "_calibrate.mp4"
     encoder = video_io.open_encoder_pipe(tmp_path, width, height, fps, use_nvenc=USE_NVENC)
 
+    import swap_backend
+    pose_gate = swap_backend.RenderPoseGate(plate_matcher.backend)
     print(f"Calibrating on the first {seconds:.0f}s ({frame_limit} frames)...")
     start = time.time()
     processed = 0
@@ -162,7 +168,8 @@ def run_calibration(cap, fps, width, height, face_app, plate_matcher, identity_m
         if not ret:
             break
         active_faces = process_frame(frame, face_app, identity_mgr, tracker, use_tracking, counts)
-        swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts)
+        swap_and_write(frame, active_faces, sources, plate_matcher, encoder, counts,
+                       pose_gate=pose_gate)
         processed += 1
     elapsed = time.time() - start
 

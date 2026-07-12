@@ -26,6 +26,7 @@ def run_render(plan_path, sources, swapper):
     backend = swap_backend.build_backend(swapper)
     print(f"  swap backend: {backend.capabilities()}")
     plate_matcher = plate_matching.PlateMatcher(backend)
+    pose_gate = swap_backend.RenderPoseGate(backend)
 
     cap = cv2.VideoCapture(str(MOVIE_PATH))
     if not cap.isOpened():
@@ -64,10 +65,11 @@ def run_render(plan_path, sources, swapper):
                         video_ended = True
                         break
                     active = [
-                        tracking.TrackedFace(kps, number, track_id)
-                        for track_id, number, kps in plan.get(frame_i, [])
+                        tracking.TrackedFace(kps, number, track_id, meta)
+                        for track_id, number, kps, meta in plan.get(frame_i, [])
                     ]
-                    swap_and_write(frame, active, sources, plate_matcher, encoder, counts)
+                    swap_and_write(frame, active, sources, plate_matcher, encoder,
+                                   counts, pose_gate=pose_gate)
                     frame_i += 1
                     frames_in_segment += 1
                     progress.update(1)
@@ -85,9 +87,12 @@ def run_render(plan_path, sources, swapper):
 
     final_path = finalize_output()
     print(f"\n{plate_matcher.summary()}")
+    print(pose_gate.summary())
     if hasattr(backend, "routed"):
         print(f"hybrid routing: {backend.routed['primary']} primary, "
-              f"{backend.routed['extreme']} extreme-pose (SimSwap)")
+              f"{backend.routed['extreme']} extreme-pose (SimSwap), "
+              f"{backend.transition_count} transitions, "
+              f"{backend.proxy_fallbacks} proxy fallbacks")
     print(f"Done. {counts['swapped']} faces swapped (from the analysis plan). Output: {final_path}")
     return final_path
 

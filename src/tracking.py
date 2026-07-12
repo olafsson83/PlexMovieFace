@@ -28,17 +28,78 @@ LK_PARAMS = dict(
 )
 
 
+def propagate_kps(prev_gray, gray, kps, stats=None):
+    """One quality-gated LK step for a five-landmark set: forward flow,
+    forward/backward round-trip consistency, one plausible partial-affine
+    motion explaining all five points, and an in-frame bound. Returns the
+    new kps or None. Shared by FaceTracker and the bidirectional bridge
+    (bridging.py) so 'the same safety gates' is literal, not aspirational.
+    `stats` (optional dict) gets the flow_rejected_* counters incremented.
+    """
+    def reject(key):
+        if stats is not None:
+            stats[key] = stats.get(key, 0) + 1
+        return None
+
+    kps = np.asarray(kps, dtype=np.float32)
+    pts = kps.reshape(-1, 1, 2)
+    new_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None, **LK_PARAMS)
+    if new_pts is None or status is None or not status.all():
+        return reject("flow_rejected_status")  # lost one or more points
+    new_kps = new_pts.reshape(-1, 2)
+
+    if TRACK_FLOW_QUALITY_GATE:
+        # LK's status only says a local optimum was found. Track the result
+        # back to the previous frame: corrupt points in blur, darkness and
+        # occlusion commonly report success but fail this round trip.
+        back_pts, back_status, _ = cv2.calcOpticalFlowPyrLK(
+            gray, prev_gray, new_pts, None, **LK_PARAMS
+        )
+        if back_pts is None or back_status is None or not back_status.all():
+            return reject("flow_rejected_status")
+        fb = np.linalg.norm(back_pts.reshape(-1, 2) - kps, axis=1)
+        if float(np.median(fb)) > TRACK_MAX_FB_ERROR_PX or float(fb.max()) > TRACK_MAX_FB_ERROR_PX * 2.0:
+            return reject("flow_rejected_fb")
+
+        # Five points used independently can collapse or shear into a shape
+        # that INSwapper interprets as a grotesque face. Require one
+        # plausible partial-affine motion to explain them.
+        A, inliers = cv2.estimateAffinePartial2D(
+            kps, new_kps.astype(np.float32),
+            method=cv2.RANSAC, ransacReprojThreshold=2.0,
+        )
+        if A is None or inliers is None or int(inliers.sum()) < 4:
+            return reject("flow_rejected_geometry")
+        predicted = kps @ A[:, :2].T + A[:, 2]
+        residual = float(np.linalg.norm(predicted - new_kps, axis=1).mean())
+        scale = float(np.hypot(A[0, 0], A[1, 0]))
+        rotation = abs(float(np.degrees(np.arctan2(A[1, 0], A[0, 0]))))
+        if (residual > TRACK_MAX_AFFINE_RESIDUAL_PX
+                or not TRACK_MIN_FRAME_SCALE <= scale <= TRACK_MAX_FRAME_SCALE
+                or rotation > TRACK_MAX_FRAME_ROTATION_DEG):
+            return reject("flow_rejected_geometry")
+
+    h, w = gray.shape[:2]
+    if (new_kps[:, 0] < 0).any() or (new_kps[:, 0] >= w).any() \
+            or (new_kps[:, 1] < 0).any() or (new_kps[:, 1] >= h).any():
+        return None  # a tracked point left the frame
+    return new_kps
+
+
 class TrackedFace:
     """Lightweight stand-in for an insightface Face -- swapper.get() only
     ever reads .kps, so that's all this needs to provide. track_id is the
     identity manager's stable per-physical-track id, carried through so
-    per-face temporal state downstream is keyed correctly."""
-    __slots__ = ("kps", "character_number", "track_id")
+    per-face temporal state downstream is keyed correctly. meta is the
+    row's evidence record (pose, scores, provenance -- see analysis_store);
+    None for callers that don't carry evidence (benchmarks, tests)."""
+    __slots__ = ("kps", "character_number", "track_id", "meta")
 
-    def __init__(self, kps, character_number, track_id=None):
+    def __init__(self, kps, character_number, track_id=None, meta=None):
         self.kps = kps
         self.character_number = character_number
         self.track_id = track_id
+        self.meta = meta
 
 
 class FaceTracker:
@@ -137,8 +198,8 @@ class FaceTracker:
         forward if no detected face this pass was even near its last known
         position; if one was, that fresh (possibly negative) result wins.
         """
-        fresh = [TrackedFace(kps.copy(), number, track_id)
-                 for kps, number, track_id in swappable_faces]
+        fresh = [TrackedFace(kps.copy(), number, track_id, meta)
+                 for kps, number, track_id, meta in swappable_faces]
         fresh_track_ids = {face.track_id for face in fresh}
 
         # Never propagate landmarks across a cut. Previously, scene-cut
@@ -188,57 +249,19 @@ class FaceTracker:
         if not faces or prev_gray is None:
             return []
 
-        h, w = gray.shape[:2]
         survivors = []
         for face in faces:
             self.stats["flow_attempts"] += 1
-            pts = face.kps.astype(np.float32).reshape(-1, 1, 2)
-            new_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None, **LK_PARAMS)
-            if new_pts is None or status is None or not status.all():
-                self.stats["flow_rejected_status"] += 1
-                continue  # lost one or more points -- drop until next full detection
-            new_kps = new_pts.reshape(-1, 2)
-
-            if TRACK_FLOW_QUALITY_GATE:
-                # LK's status only says a local optimum was found. Track the
-                # result back to the previous frame: corrupt points in blur,
-                # darkness and occlusion commonly report success but fail
-                # this round trip.
-                back_pts, back_status, _ = cv2.calcOpticalFlowPyrLK(
-                    gray, prev_gray, new_pts, None, **LK_PARAMS
-                )
-                if back_pts is None or back_status is None or not back_status.all():
-                    self.stats["flow_rejected_status"] += 1
-                    continue
-                fb = np.linalg.norm(back_pts.reshape(-1, 2) - face.kps, axis=1)
-                if float(np.median(fb)) > TRACK_MAX_FB_ERROR_PX or float(fb.max()) > TRACK_MAX_FB_ERROR_PX * 2.0:
-                    self.stats["flow_rejected_fb"] += 1
-                    continue
-
-                # Five points used independently can collapse or shear into a
-                # shape that INSwapper interprets as a grotesque face. Require
-                # one plausible partial-affine motion to explain them.
-                A, inliers = cv2.estimateAffinePartial2D(
-                    face.kps.astype(np.float32), new_kps.astype(np.float32),
-                    method=cv2.RANSAC, ransacReprojThreshold=2.0,
-                )
-                if A is None or inliers is None or int(inliers.sum()) < 4:
-                    self.stats["flow_rejected_geometry"] += 1
-                    continue
-                predicted = face.kps @ A[:, :2].T + A[:, 2]
-                residual = float(np.linalg.norm(predicted - new_kps, axis=1).mean())
-                scale = float(np.hypot(A[0, 0], A[1, 0]))
-                rotation = abs(float(np.degrees(np.arctan2(A[1, 0], A[0, 0]))))
-                if (residual > TRACK_MAX_AFFINE_RESIDUAL_PX
-                        or not TRACK_MIN_FRAME_SCALE <= scale <= TRACK_MAX_FRAME_SCALE
-                        or rotation > TRACK_MAX_FRAME_ROTATION_DEG):
-                    self.stats["flow_rejected_geometry"] += 1
-                    continue
-
-            if (new_kps[:, 0] < 0).any() or (new_kps[:, 0] >= w).any() \
-                    or (new_kps[:, 1] < 0).any() or (new_kps[:, 1] >= h).any():
-                continue  # a tracked point left the frame
+            new_kps = propagate_kps(prev_gray, gray, face.kps, self.stats)
+            if new_kps is None:
+                continue
             face.kps = new_kps
+            if face.meta is not None and face.meta.get("provenance") == "detector":
+                # Propagated rows carry the last detection's pose/scores but
+                # are marked as flow evidence (stale pose, no fresh detector
+                # confidence) so the render pass can weigh them accordingly.
+                face.meta = {**face.meta, "provenance": "flow",
+                             "confidence": min(face.meta.get("confidence", 1.0), 0.8)}
             survivors.append(face)
         return survivors
 

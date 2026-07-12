@@ -62,14 +62,14 @@ class AssociationTests(unittest.TestCase):
         a = FakeFace({"1": 0.9}, KPS_A)
         b = FakeFace({"2": 0.9}, KPS_B)
         out = mgr.observe([a, b])
-        ids = {n: tid for _, n, tid in out}
+        ids = {n: tid for _, n, tid, _ in out}
         self.assertEqual(len(out), 2)
 
         # Positions cross; embeddings stay with their people.
         a2 = FakeFace({"1": 0.9}, KPS_B)
         b2 = FakeFace({"2": 0.9}, KPS_A)
         out2 = mgr.observe([a2, b2])
-        ids2 = {n: tid for _, n, tid in out2}
+        ids2 = {n: tid for _, n, tid, _ in out2}
         self.assertEqual(ids2["1"], ids["1"])  # same physical track for "1"
         self.assertEqual(ids2["2"], ids["2"])
 
@@ -105,8 +105,9 @@ class BackfillTests(unittest.TestCase):
         rows = backfill_swap_rows(log, THRESHOLDS, max_gap_frames=15)
         frames = sorted(r[0] for r in rows)
         self.assertEqual(frames, list(range(0, 10)))  # 0..9 recovered
-        for frame, track_id, number, kps in rows:
+        for frame, track_id, number, kps, meta in rows:
             self.assertEqual((track_id, number), (5, "1"))
+            self.assertEqual(meta["provenance"], "backfill")
         # Interpolation: frame 5's kps equals the recorded observation's.
         kps5 = next(r[3] for r in rows if r[0] == 5)
         np.testing.assert_allclose(kps5, KPS_A + 2.0, atol=1e-5)

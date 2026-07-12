@@ -32,6 +32,7 @@ import time), same pattern as evaluate.py.
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -81,6 +82,7 @@ def run_probe(probe, out_dir):
 
     backend = swap_backend.build_backend()
     matcher = plate_matching.PlateMatcher(backend)
+    pose_gate = swap_backend.RenderPoseGate(backend)
     source_embeddings = {
         n: _normed(np.asarray(f.normed_embedding, dtype=np.float32))
         for n, f in sources.items()
@@ -117,10 +119,14 @@ def run_probe(probe, out_dir):
             rows = plan.get(frame_i, [])
             out_frame = frame.copy()
             frame_rec = {"frame": frame_i, "rows": []}
-            for track_id, number, kps in rows:
+            for track_id, number, kps, meta in rows:
                 if number not in sources:
                     continue
-                tf = tracking.TrackedFace(np.asarray(kps), number, track_id)
+                tf = tracking.TrackedFace(np.asarray(kps), number, track_id, meta)
+                if not pose_gate.renderable(tf):
+                    frame_rec.setdefault("pose_withheld", 0)
+                    frame_rec["pose_withheld"] += 1
+                    continue
                 out_frame = matcher.swap(out_frame, tf, sources[number])
                 route = getattr(backend, "last_route", None)
                 if route is not None:
@@ -145,6 +151,8 @@ def run_probe(probe, out_dir):
                 frame_rec["rows"].append({
                     "track_id": track_id,
                     "number": number,
+                    "yaw": None if meta is None or math.isnan(meta["yaw"]) else round(meta["yaw"], 1),
+                    "provenance": None if meta is None else meta["provenance"],
                     "orig_sim": round(orig_sim, 4),
                     "out_sim": round(out_sim, 4),
                     "identity_gain": round(out_sim - orig_sim, 4),
@@ -173,6 +181,7 @@ def run_probe(probe, out_dir):
             "route_counts": {r: sum(1 for x in all_rows if x["route"] == r)
                              for r in {x["route"] for x in all_rows}} if all_rows else {},
             "route_transitions": transitions,
+            "pose_withheld": sum(f.get("pose_withheld", 0) for f in frames_out),
             "per_frame": frames_out,
         }
         results["windows"].append(summary)
@@ -189,6 +198,12 @@ def run_probe(probe, out_dir):
               f"routes {summary['route_counts']} ({transitions} transitions)")
 
     cap.release()
+    for arm in (backend, getattr(backend, "primary", None),
+                getattr(backend, "extreme", None)):
+        if arm is not None and getattr(arm, "alignment_stats", None):
+            results.setdefault("alignment_stats", {})[arm.name] = arm.alignment_stats
+    if matcher.backend_withheld:
+        results["backend_withheld"] = matcher.backend_withheld
     out_path = out_dir / f"render_{probe['name']}.json"
     out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"  -> {out_path}")
