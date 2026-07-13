@@ -78,6 +78,33 @@ TRACK_MISS_LIMIT = int(os.environ.get("TRACK_MISS_LIMIT", "2"))
 # present; set false to force the .env MATCH/MAINTAIN values.
 IDENTITY_AUTO_CALIBRATION = os.environ.get("IDENTITY_AUTO_CALIBRATION", "true").lower() == "true"
 
+# Color/lighting match: pull the generated face's color distribution toward
+# the plate's in Lab space over the face interior, before the optics passes.
+# Different swap backends (inswapper vs SimSwap) and a source photo shot
+# under different light render the face in a different tone; matching both to
+# the plate lands them in the same colour envelope, cutting the tonal jump at
+# backend-routing boundaries (the main residual flicker once identity is
+# stable) and the general pasted-on look. Deliberately a BOUNDED, partial
+# pull (not a full transfer / Poisson clone, which drags the face toward
+# surrounding skin and can shift apparent identity).
+COLOR_MATCHING = os.environ.get("COLOR_MATCHING", "true").lower() == "true"
+# Fraction of the full plate-ward correction to apply (1.0 = full transfer).
+COLOR_STRENGTH = float(os.environ.get("COLOR_STRENGTH", "0.5"))
+# Per-channel caps: absolute Lab mean shift (0..255 scale) and std gain.
+COLOR_MAX_SHIFT = float(os.environ.get("COLOR_MAX_SHIFT", "24.0"))
+COLOR_MAX_GAIN = float(os.environ.get("COLOR_MAX_GAIN", "1.25"))
+# High inertia: a track's lighting is near-constant within a shot, so the
+# colour params should barely move frame to frame (low smoothing let plate
+# measurement noise through as jitter).
+COLOR_TEMPORAL_SMOOTHING = float(os.environ.get("COLOR_TEMPORAL_SMOOTHING", "0.88"))
+# Dead-zone: when the generated face already matches the plate to within
+# these per-frame measurement-noise bounds, apply NO correction. Without it,
+# correcting a near-zero tone gap on an already-matched frontal swap just
+# tracks the plate's per-frame colour noise and adds temporal jitter (it
+# regressed the render harness's instability metric on a clean two-hander).
+COLOR_MIN_SHIFT = float(os.environ.get("COLOR_MIN_SHIFT", "4.0"))
+COLOR_MIN_GAIN_DELTA = float(os.environ.get("COLOR_MIN_GAIN_DELTA", "0.05"))
+
 # Plate matching (see plate_matching.py): degrade the generated face layer
 # to match the plate's optics before compositing. Phase 3: sharpness.
 SHARPNESS_MATCHING = os.environ.get("SHARPNESS_MATCHING", "true").lower() == "true"

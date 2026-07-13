@@ -1,5 +1,22 @@
 # Plate-matching & identity roadmap
 
+## Colour/lighting matching (2026-07-13)
+
+External roadmap suggestion (color/lighting transfer, challenged down from
+"Poisson blending" to a lighter bounded pull -- full Poisson drags the face
+toward surrounding skin and shifts apparent identity). plate_matching had
+sharpness/grain/motion matching but no colour transfer, so inswapper-John
+and SimSwap-John rendered in visibly different tones at routing boundaries.
+ColorMatcher pulls the generated crop's Lab mean/std toward the plate's over
+the face interior -- a bounded (gain clamp + max shift), strength-scaled
+(0.5) partial pull, temporally smoothed per track (0.88). A dead-zone
+(min shift 4 Lab) leaves already-matched faces untouched -- without it the
+matcher tracked plate colour noise and regressed the harness instability
+metric on a clean two-hander (1.11 -> 1.52); dead-zone + high inertia
+brought it back under the gate. Render-harness compare PASS on both
+fixtures with identity gain preserved/improved (t22 0.01->0.062,
+frontal 0.827->0.829); 112 unit tests. NB: re-render to apply.
+
 ## Full-movie finding: alignment inlier gate over-rejected profiles (2026-07-12)
 
 First full feature-length run (Die Hard with a Vengeance, 1080p, John2 as

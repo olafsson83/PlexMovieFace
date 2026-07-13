@@ -33,6 +33,8 @@ import numpy as np
 from insightface.utils import face_align
 
 from config import (
+    COLOR_MATCHING, COLOR_STRENGTH, COLOR_MAX_SHIFT, COLOR_MAX_GAIN,
+    COLOR_TEMPORAL_SMOOTHING, COLOR_MIN_SHIFT, COLOR_MIN_GAIN_DELTA,
     SHARPNESS_MATCHING, SHARPNESS_TOLERANCE, SHARPNESS_MAX_SIGMA,
     SHARPNESS_TEMPORAL_SMOOTHING,
     GRAIN_MATCHING, GRAIN_MAX_SIGMA, GRAIN_MIN_SIGMA,
@@ -122,6 +124,82 @@ def composite(frame, warped_fake, soft_mask, face_region=None, mask_size=None):
     mask = soft_mask[:, :, None]
     merged = mask * warped_fake + (1 - mask) * frame.astype(np.float32)
     return merged.astype(np.uint8)
+
+
+class ColorMatcher:
+    """Pulls the generated crop's colour/lighting toward the plate's in Lab
+    space over the shared face interior, so different backends (and a source
+    photo lit differently than the scene) land in the same colour envelope.
+
+    Bounded on purpose: per-channel std gain is clamped and the whole
+    correction is scaled by `strength` (< 1) -- a partial pull, not a full
+    transfer. Full transfer / Poisson cloning drags the face toward the
+    surrounding skin tone and can shift apparent identity; a bounded pull
+    corrects lighting/colour without that. Measured in Lab (L = lightness,
+    a/b = colour) over the crop interior only (the border warps in
+    background). Temporally smoothed per track with a position-jump reset,
+    like the sharpness/grain matchers, so tone can't pop frame to frame.
+    """
+
+    def __init__(self, strength=COLOR_STRENGTH, max_shift=COLOR_MAX_SHIFT,
+                 max_gain=COLOR_MAX_GAIN, smoothing=COLOR_TEMPORAL_SMOOTHING,
+                 min_shift=COLOR_MIN_SHIFT, min_gain_delta=COLOR_MIN_GAIN_DELTA):
+        self.strength = strength
+        self.max_shift = max_shift
+        self.max_gain = max_gain
+        self.smoothing = smoothing
+        self.min_shift = min_shift
+        self.min_gain_delta = min_gain_delta
+        self._state = {}      # track key -> (params[6], center)
+        self.applied = []     # per-swap applied |L shift|, for the summary
+
+    def reset(self):
+        self._state.clear()
+
+    def match(self, plate_crop, fake_crop, key, center):
+        interior = _interior_mask(fake_crop.shape[0])
+        # cv2 BGR<->Lab on uint8: L,a,b all in 0..255 (a/b centred at 128).
+        plate_lab = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2Lab).astype(np.float32)
+        fake_lab = cv2.cvtColor(fake_crop, cv2.COLOR_BGR2Lab).astype(np.float32)
+        pm = plate_lab[interior].mean(axis=0)
+        ps = plate_lab[interior].std(axis=0)
+        fm = fake_lab[interior].mean(axis=0)
+        fs = fake_lab[interior].std(axis=0)
+        gain = np.clip(ps / np.maximum(fs, 1e-3), 1.0 / self.max_gain, self.max_gain)
+        shift = np.clip(pm - fm, -self.max_shift, self.max_shift)
+        # Dead-zone: an already-matched face (small gap, within per-frame
+        # measurement noise) gets NO correction -- otherwise the matcher just
+        # tracks the plate's colour noise and adds temporal jitter.
+        shift = np.where(np.abs(shift) < self.min_shift, 0.0, shift)
+        gain = np.where(np.abs(gain - 1.0) < self.min_gain_delta, 1.0, gain)
+        raw = np.concatenate([shift, gain]).astype(np.float32)
+
+        prev = self._state.get(key)
+        if prev is not None and np.linalg.norm(center - prev[1]) < SMOOTHING_RESET_DISTANCE:
+            params = (1 - self.smoothing) * raw + self.smoothing * prev[0]
+        else:
+            params = raw
+        self._state[key] = (params, center)
+        shift, gain = params[:3], params[3:]
+
+        # Partial pull: apply `strength` of the full gain/shift correction,
+        # recentre on the fake's own mean so only the delta is scaled.
+        g = 1.0 + self.strength * (gain - 1.0)
+        s = self.strength * shift
+        out = (fake_lab - fm) * g + fm + s
+        self.applied.append(float(abs(s[0])))
+        out = np.clip(out, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(out, cv2.COLOR_Lab2BGR)
+
+    def summary(self):
+        if not self.applied:
+            return "color matching: no faces processed"
+        arr = np.array(self.applied)
+        engaged = arr[arr > 0.5]
+        if not len(engaged):
+            return f"color matching: 0/{len(arr)} swaps needed a tone shift"
+        return (f"color matching: {len(engaged)}/{len(arr)} swaps tone-matched "
+                f"(mean |L| shift {engaged.mean():.1f}, max {arr.max():.1f})")
 
 
 class SharpnessMatcher:
@@ -472,6 +550,7 @@ class PlateMatcher:
             from swap_backend import InswapperBackend
             backend = InswapperBackend(backend)
         self.backend = backend
+        self.color = ColorMatcher() if COLOR_MATCHING else None
         self.motion = MotionBlurMatcher() if MOTION_BLUR_MATCHING else None
         self.sharpness = SharpnessMatcher() if SHARPNESS_MATCHING else None
         self.grain = GrainMatcher() if GRAIN_MATCHING else None
@@ -498,17 +577,26 @@ class PlateMatcher:
         key = tracked_face.track_id if tracked_face.track_id is not None \
             else tracked_face.character_number
 
+        # The plate must be measured from the UNswapped frame; frame is
+        # untouched until composite below, so this crop is clean. Computed
+        # once (in crop space) and shared by colour + sharpness matching.
+        plate_crop = None
+        if self.color is not None or self.sharpness is not None:
+            plate_crop, _ = face_align.norm_crop2(
+                frame, tracked_face.kps, bgr_fake.shape[0]
+            )
+
+        # Colour/lighting first (a tone correction is more fundamental than
+        # the optics passes that follow, and both measure the same plate).
+        if self.color is not None:
+            bgr_fake = self.color.match(plate_crop, bgr_fake, key, center)
+
         if self.motion is not None:
             bgr_fake, _ = self.motion.blur_crop(
                 bgr_fake, tracked_face.kps, M, key, center
             )
 
         if self.sharpness is not None:
-            # The plate must be measured from the UNswapped frame; frame is
-            # untouched until composite below, so this crop is clean.
-            plate_crop, _ = face_align.norm_crop2(
-                frame, tracked_face.kps, bgr_fake.shape[0]
-            )
             sigma = self.sharpness.choose_sigma(
                 plate_crop, bgr_fake, key, center
             )
@@ -531,6 +619,8 @@ class PlateMatcher:
 
     def summary(self):
         parts = []
+        if self.color is not None:
+            parts.append(self.color.summary())
         if self.motion is not None:
             parts.append(self.motion.summary())
         if self.sharpness is not None:
